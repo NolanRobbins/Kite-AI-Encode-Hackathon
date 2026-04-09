@@ -55,19 +55,24 @@ def price_from_aspiration(
 ) -> float:
     """Map an aspiration level (1 = best for me, 0 = worst) to a price.
 
-    For a **buyer**, aspiration 1.0 → ``reservation`` (lowest price they'd
-    prefer) and 0.0 → ``opponent_reservation`` (highest price = seller's
-    reservation).
+    For a **buyer** (``reservation`` = max they'd pay, ``opponent_reservation``
+    = min the seller would accept):
+      asp 1.0 → ``opponent_reservation`` (best for buyer: pay the minimum)
+      asp 0.0 → ``reservation`` (worst: pay up to their max)
 
-    For a **seller**, aspiration 1.0 → ``reservation`` (highest price) and
-    0.0 → ``opponent_reservation`` (lowest = buyer's reservation).
+    For a **seller** (``reservation`` = min they'd accept,
+    ``opponent_reservation`` = max the buyer would pay):
+      asp 1.0 → ``opponent_reservation`` (best for seller: get the maximum)
+      asp 0.0 → ``reservation`` (worst: accept the minimum)
     """
     if is_buyer:
-        # asp=1 → low price (buyer ideal), asp=0 → high price
-        return reservation + (1.0 - asp) * (opponent_reservation - reservation)
+        # asp=1 → opponent_reservation (low, ideal for buyer)
+        # asp=0 → reservation (high, buyer's walk-away ceiling)
+        return opponent_reservation + (1.0 - asp) * (reservation - opponent_reservation)
     else:
-        # asp=1 → high price (seller ideal), asp=0 → low price
-        return reservation - (1.0 - asp) * (reservation - opponent_reservation)
+        # asp=1 → opponent_reservation (high, ideal for seller)
+        # asp=0 → reservation (low, seller's walk-away floor)
+        return opponent_reservation - (1.0 - asp) * (opponent_reservation - reservation)
 
 
 # ---------------------------------------------------------------------------

@@ -12,6 +12,13 @@ from enum import Enum
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
+from negotiatorgrid.core.negotiation import NegotiationSession
+from negotiatorgrid.core.opponent_model import OpponentModeler
+from negotiatorgrid.core.nash_guardrail import NashGuardrail
+from negotiatorgrid.core.types import NegotiationConfig as CoreNegConfig
+from negotiatorgrid.core.types import NegotiationOffer as CoreOffer
+from negotiatorgrid.llm.offer_generator import OfferGenerator
+
 logger = logging.getLogger(__name__)
 
 
@@ -144,80 +151,16 @@ class NegotiationParams:
 
 
 # ---------------------------------------------------------------------------
-# Simple built-in alternating-offers protocol
+# Strategy name → aspiration exponent mapping
 # ---------------------------------------------------------------------------
 
-def _aspiration_offer(
-    initial: float,
-    reservation: float,
-    t: float,
-    concession_exponent: float = 2.0,
-) -> float:
-    """Time-dependent aspiration strategy.
-
-    t in [0, 1] is the normalised negotiation time.
-    concession_exponent > 1 → Boulware (slow concession early, fast late)
-    concession_exponent < 1 → Conceder (fast early, slow late)
-    concession_exponent == 1 → Linear
-    """
-    return initial + (reservation - initial) * (t ** concession_exponent)
-
-
-def _concession_exponent(strategy: str) -> float:
-    """Map strategy name to concession exponent."""
-    return {
-        "aspiration": 1.5,
-        "boulware": 3.0,
-        "tit-for-tat": 1.0,
-        "conceder": 0.5,
-    }.get(strategy, 1.5)
-
-
-def _generate_nl_message(role: str, price: float, round_num: int, total_rounds: int) -> str:
-    """Generate a natural-language negotiation message (no LLM required)."""
-    t = round_num / max(total_rounds, 1)
-    if role == "buyer":
-        if t < 0.3:
-            return f"I'd like to start at ${price:.4f} per call. I believe this is a fair market rate given current alternatives."
-        elif t < 0.7:
-            return f"I can move to ${price:.4f}. Let's find middle ground — I value a long-term relationship."
-        else:
-            return f"My best offer is ${price:.4f}. I'm close to my limit but want to make this work."
-    else:
-        if t < 0.3:
-            return f"My service is worth ${price:.4f} per call — sub-150ms latency with 99.9% uptime."
-        elif t < 0.7:
-            return f"I can come down to ${price:.4f}. This still covers my operational costs."
-        else:
-            return f"${price:.4f} is my minimum. I've settled 47 deals at this quality tier."
-
-
-def _estimate_opponent_reservation(offers: list[float]) -> dict[str, Any]:
-    """Simple opponent model: linear extrapolation of concession trend."""
-    if len(offers) < 2:
-        return {"estimated_reservation": None, "confidence": 0.0}
-    deltas = [offers[i] - offers[i - 1] for i in range(1, len(offers))]
-    avg_delta = sum(deltas) / len(deltas)
-    if abs(avg_delta) < 1e-9:
-        est = offers[-1]
-    else:
-        remaining_steps = max(3, len(offers))
-        est = offers[-1] + avg_delta * remaining_steps
-    confidence = min(0.9, 0.3 + 0.15 * len(offers))
-    return {"estimated_reservation": round(est, 6), "confidence": round(confidence, 2)}
-
-
-def _nash_check(buyer_price: float, seller_price: float, buyer_res: float, seller_res: float) -> str:
-    """Simplified Nash-bargaining check: are both parties inside the ZOPA?"""
-    zopa_low = min(buyer_res, seller_res)
-    zopa_high = max(buyer_res, seller_res)
-    mid = (buyer_price + seller_price) / 2
-    if zopa_low <= mid <= zopa_high:
-        return "PASS"
-    gap = abs(buyer_price - seller_price)
-    if gap < 0.02:
-        return "PASS"
-    return "WARN"
+_STRATEGY_EXPONENTS: dict[str, float] = {
+    "aspiration": 4.0,
+    "boulware": 4.0,
+    "tit-for-tat": 1.0,
+    "conceder": 0.25,
+    "linear": 1.0,
+}
 
 
 def compute_deal_hash(negotiation_id: str, agreed_price: float, rounds: int) -> str:
@@ -236,7 +179,10 @@ def compute_deal_hash(negotiation_id: str, agreed_price: float, rounds: int) -> 
 class NegotiationExecutor:
     """Manages an A2A bilateral negotiation session.
 
-    Bridges alternating-offers protocol to A2A Task lifecycle messages.
+    Delegates the actual negotiation to the NegMAS-backed
+    ``NegotiationSession`` from ``core.negotiation``, then post-processes
+    the transcript with opponent modelling, Nash guardrail checks, and
+    NL message generation.
     """
 
     def __init__(
@@ -262,15 +208,13 @@ class NegotiationExecutor:
         self.state = NegotiationState.DISCOVERING
         start_time = time.time()
 
-        # Store session
+        # Store session metadata
         session: dict[str, Any] = {
             "id": negotiation_id,
             "buyer": buyer_config,
             "seller": seller_config,
             "params": neg_config,
             "rounds": [],
-            "buyer_offers": [],
-            "seller_offers": [],
             "start_time": start_time,
         }
         self._negotiations[negotiation_id] = session
@@ -278,74 +222,149 @@ class NegotiationExecutor:
         # Transition to negotiation
         self.state = NegotiationState.NEGOTIATING
 
-        buyer_exp = _concession_exponent(buyer_config.strategy)
-        seller_exp = _concession_exponent(seller_config.strategy)
+        # Map strategy names to aspiration exponents
+        buyer_exp = _STRATEGY_EXPONENTS.get(buyer_config.strategy, 4.0)
+        seller_exp = _STRATEGY_EXPONENTS.get(seller_config.strategy, 4.0)
 
-        agreed_price = 0.0
-        success = False
-        reason = "max_rounds_reached"
+        # Build core NegotiationConfig with price range encompassing both
+        # agents' reservation prices plus margin
+        price_min = min(buyer_config.initial_price, seller_config.reservation_price) * 0.8
+        price_max = max(seller_config.initial_price, buyer_config.reservation_price) * 1.2
+        # Ensure a sane range (at least 1 unit wide for NegMAS discrete issues)
+        if price_max - price_min < 1.0:
+            price_min = min(buyer_config.initial_price, seller_config.reservation_price) - 1.0
+            price_max = max(seller_config.initial_price, buyer_config.reservation_price) + 1.0
 
-        for r in range(1, neg_config.max_rounds + 1):
-            t = r / neg_config.max_rounds
+        core_config = CoreNegConfig(
+            max_rounds=neg_config.max_rounds,
+            timeout_seconds=neg_config.timeout_seconds,
+            price_min=price_min,
+            price_max=price_max,
+            buyer_reservation=buyer_config.reservation_price,
+            seller_reservation=seller_config.reservation_price,
+        )
 
-            # Buyer offer
-            buyer_price = _aspiration_offer(
-                buyer_config.initial_price,
-                buyer_config.reservation_price,
-                t,
-                buyer_exp,
-            )
-            buyer_price = round(buyer_price, 6)
-            buyer_nl = _generate_nl_message("buyer", buyer_price, r, neg_config.max_rounds)
-            buyer_offer = NegotiationOffer(
-                round=r,
-                price=buyer_price,
-                scope=neg_config.scope,
-                nl_message=buyer_nl,
-                agent_id=buyer_config.agent_id,
-                utility=round(1.0 - t * 0.3, 3),
-                aspiration=round(1.0 - t * 0.5, 3),
-                stance="generous" if t > 0.6 else "neutral",
-            )
-            session["buyer_offers"].append(buyer_price)
+        # Create opponent modelers
+        buyer_om = OpponentModeler(
+            is_opponent_seller=True,
+            price_min=core_config.price_min,
+            price_max=core_config.price_max,
+        )
+        seller_om = OpponentModeler(
+            is_opponent_seller=False,
+            price_min=core_config.price_min,
+            price_max=core_config.price_max,
+        )
 
-            # Seller offer
-            seller_price = _aspiration_offer(
-                seller_config.initial_price,
-                seller_config.reservation_price,
-                t,
-                seller_exp,
-            )
-            seller_price = round(seller_price, 6)
-            seller_nl = _generate_nl_message("seller", seller_price, r, neg_config.max_rounds)
-            seller_offer = NegotiationOffer(
-                round=r,
-                price=seller_price,
-                scope=neg_config.scope,
-                nl_message=seller_nl,
-                agent_id=seller_config.agent_id,
-                utility=round(1.0 - t * 0.25, 3),
-                aspiration=round(1.0 - t * 0.45, 3),
-                stance="generous" if t > 0.6 else "neutral",
-            )
-            session["seller_offers"].append(seller_price)
+        # Create and run the REAL NegMAS-backed negotiation session
+        neg_session = NegotiationSession(
+            config=core_config,
+            buyer_opponent_modeler=buyer_om,
+            seller_opponent_modeler=seller_om,
+            buyer_exponent=buyer_exp,
+            seller_exponent=seller_exp,
+        )
+        core_result = neg_session.run()
 
-            # Opponent models
-            opp_model = _estimate_opponent_reservation(session["seller_offers"])
-            nash = _nash_check(
-                buyer_price,
-                seller_price,
-                buyer_config.reservation_price,
-                seller_config.reservation_price,
-            )
+        # Post-process the transcript: build round-by-round data with
+        # opponent model updates, Nash checks, and NL messages
+        guardrail = NashGuardrail()
+        offer_gen = OfferGenerator()  # No API key = template mode
+
+        # Group transcript offers into rounds (buyer + seller per round)
+        buyer_offers_by_round: dict[int, CoreOffer] = {}
+        seller_offers_by_round: dict[int, CoreOffer] = {}
+        for offer in core_result.transcript:
+            if offer.agent_id == "buyer":
+                buyer_offers_by_round[offer.round_number] = offer
+            elif offer.agent_id == "seller":
+                seller_offers_by_round[offer.round_number] = offer
+
+        all_round_nums = sorted(set(buyer_offers_by_round.keys()) | set(seller_offers_by_round.keys()))
+
+        rounds_data: list[NegotiationRound] = []
+        for rnd in all_round_nums:
+            r_num = rnd + 1  # 0-indexed NegMAS step → 1-indexed round
+
+            b_core = buyer_offers_by_round.get(rnd)
+            s_core = seller_offers_by_round.get(rnd)
+
+            # Generate NL messages via OfferGenerator
+            buyer_nl = ""
+            seller_nl = ""
+            if b_core:
+                buyer_nl = offer_gen.generate_buyer_offer(round_num=r_num, price=b_core.price)
+            if s_core:
+                seller_nl = offer_gen.generate_seller_counter(round_num=r_num, price=s_core.price)
+
+            # Compute aspiration and stance from time
+            t = r_num / max(neg_config.max_rounds, 1)
+
+            buyer_offer = None
+            if b_core:
+                buyer_offer = NegotiationOffer(
+                    round=r_num,
+                    price=b_core.price,
+                    scope=neg_config.scope,
+                    nl_message=buyer_nl,
+                    agent_id=buyer_config.agent_id or "buyer",
+                    timestamp=b_core.timestamp,
+                    utility=round(1.0 - t * 0.3, 3),
+                    aspiration=round(1.0 - t * 0.5, 3),
+                    stance="generous" if t > 0.6 else "neutral",
+                )
+
+            seller_offer = None
+            if s_core:
+                seller_offer = NegotiationOffer(
+                    round=r_num,
+                    price=s_core.price,
+                    scope=neg_config.scope,
+                    nl_message=seller_nl,
+                    agent_id=seller_config.agent_id or "seller",
+                    timestamp=s_core.timestamp,
+                    utility=round(1.0 - t * 0.25, 3),
+                    aspiration=round(1.0 - t * 0.45, 3),
+                    stance="generous" if t > 0.6 else "neutral",
+                )
+
+            # Get opponent model snapshot from the buyer's perspective
+            opp_model_data = buyer_om.get_model()
+            opp_model_dict = {
+                "estimated_reservation": round(opp_model_data.estimated_reservation_price, 6),
+                "confidence": round(opp_model_data.confidence, 2),
+            }
+
+            # Nash guardrail check for this round
+            nash_status = "N/A"
+            if b_core and s_core:
+                buyer_price = b_core.price
+                seller_price = s_core.price
+                # Simple ZOPA check using the guardrail's logic
+                def buyer_ufun(p: float) -> float:
+                    return max(0.0, buyer_config.reservation_price - p)
+
+                def seller_ufun(p: float) -> float:
+                    return max(0.0, p - seller_config.reservation_price)
+
+                nash_result = guardrail.check_deal(
+                    agreed_price=(buyer_price + seller_price) / 2.0,
+                    buyer_ufun=buyer_ufun,
+                    seller_ufun=seller_ufun,
+                    price_min=core_config.price_min,
+                    price_max=core_config.price_max,
+                    grid_size=11,
+                )
+                nash_status = "PASS" if nash_result.passed else "WARN"
 
             neg_round = NegotiationRound(
-                round_number=r,
+                round_number=r_num,
                 buyer_offer=buyer_offer,
                 seller_offer=seller_offer,
-                opponent_model=opp_model,
-                nash_check=nash,
+                opponent_model=opp_model_dict,
+                nash_check=nash_status,
             )
+            rounds_data.append(neg_round)
             session["rounds"].append(neg_round)
 
             # Broadcast round if callback registered
@@ -355,44 +374,40 @@ class NegotiationExecutor:
                 except Exception:
                     logger.exception("Error in on_round callback")
 
-            # Small delay for realism
+            # Small delay for visual streaming effect
             await asyncio.sleep(0.1)
 
-            # Check for acceptance: buyer price >= seller price → deal
-            if buyer_price >= seller_price:
-                agreed_price = round((buyer_price + seller_price) / 2, 6)
-                success = True
-                reason = "agreement"
-                break
-
         duration = time.time() - start_time
-        deal_hash = compute_deal_hash(negotiation_id, agreed_price, len(session["rounds"])) if success else ""
+        success = core_result.agreed_price is not None
+        agreed_price = core_result.agreed_price or 0.0
 
-        # Compute utilities
-        if success and buyer_config.reservation_price != buyer_config.initial_price:
-            buyer_util = 1.0 - (agreed_price - buyer_config.initial_price) / (
-                buyer_config.reservation_price - buyer_config.initial_price
-            )
-        else:
-            buyer_util = 0.0
+        deal_hash = compute_deal_hash(negotiation_id, agreed_price, len(rounds_data)) if success else ""
 
-        if success and seller_config.initial_price != seller_config.reservation_price:
-            seller_util = 1.0 - (seller_config.initial_price - agreed_price) / (
-                seller_config.initial_price - seller_config.reservation_price
-            )
-        else:
-            seller_util = 0.0
+        # Compute utilities relative to initial/reservation prices
+        buyer_util = 0.0
+        seller_util = 0.0
+        if success:
+            if buyer_config.reservation_price != buyer_config.initial_price:
+                buyer_util = 1.0 - (agreed_price - buyer_config.initial_price) / (
+                    buyer_config.reservation_price - buyer_config.initial_price
+                )
+            if seller_config.initial_price != seller_config.reservation_price:
+                seller_util = 1.0 - (seller_config.initial_price - agreed_price) / (
+                    seller_config.initial_price - seller_config.reservation_price
+                )
+
+        reason = "agreement" if success else "max_rounds_reached"
 
         result = NegotiationResult(
             negotiation_id=negotiation_id,
             success=success,
             agreed_price=agreed_price,
-            total_rounds=len(session["rounds"]),
+            total_rounds=len(rounds_data),
             deal_hash=deal_hash,
             buyer_utility=round(max(0, min(1, buyer_util)), 3),
             seller_utility=round(max(0, min(1, seller_util)), 3),
             duration_seconds=round(duration, 3),
-            rounds=session["rounds"],
+            rounds=rounds_data,
             reason=reason,
         )
 
