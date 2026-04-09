@@ -1,0 +1,23 @@
+{
+  "name": "negotiatorgrid-contracts",
+  "version": "1.0.0",
+  "description": "NegotiatorGrid smart contracts for Kite AI blockchain",
+  "scripts": {
+    "compile": "hardhat compile",
+    "test": "hardhat test",
+    "deploy:kite": "hardhat ignition deploy ignition/modules/NegotiatorGrid.ts --network kiteTestnet",
+    "verify": "hardhat verify --network kiteTestnet"
+  },
+  "devDependencies": {
+    "@nomicfoundation/hardhat-ignition": "^0.15.0",
+    "@nomicfoundation/hardhat-ignition-ethers": "^0.15.0",
+    "@nomicfoundation/hardhat-toolbox": "^5.0.0",
+    "@nomicfoundation/hardhat-verify": "^2.0.0",
+    "@openzeppelin/contracts": "^5.1.0",
+    "dotenv": "^16.4.0",
+    "hardhat": "^2.22.0",
+    "typescript": "^5.4.0",
+    "ts-node": "^10.9.0",
+    "@types/node": "^20.0.0"
+  }
+}

@@ -9,3 +9,16 @@ __pycache__/
 .DS_Store
 Thumbs.db
 *.log
+
+# Hardhat
+contracts/artifacts/
+contracts/cache/
+contracts/typechain-types/
+contracts/ignition/deployments/
+
+# Python
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.ruff_cache/

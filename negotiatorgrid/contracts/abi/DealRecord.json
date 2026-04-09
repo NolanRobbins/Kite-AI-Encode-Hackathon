@@ -1,0 +1,582 @@
+[
+  {
+    "inputs": [
+      {
+        "internalType": "address",
+        "name": "identityRegistry_",
+        "type": "address"
+      },
+      {
+        "internalType": "address",
+        "name": "reputationRegistry_",
+        "type": "address"
+      }
+    ],
+    "stateMutability": "nonpayable",
+    "type": "constructor"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "bytes32",
+        "name": "dealHash",
+        "type": "bytes32"
+      },
+      {
+        "indexed": true,
+        "internalType": "address",
+        "name": "buyer",
+        "type": "address"
+      },
+      {
+        "indexed": true,
+        "internalType": "address",
+        "name": "seller",
+        "type": "address"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint256",
+        "name": "finalPrice",
+        "type": "uint256"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint8",
+        "name": "negotiationRounds",
+        "type": "uint8"
+      }
+    ],
+    "name": "DealRecorded",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "bytes32",
+        "name": "dealHash",
+        "type": "bytes32"
+      },
+      {
+        "indexed": false,
+        "internalType": "bytes32",
+        "name": "x402TxHash",
+        "type": "bytes32"
+      }
+    ],
+    "name": "DealSettled",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "bytes32",
+        "name": "dealHash",
+        "type": "bytes32"
+      },
+      {
+        "indexed": true,
+        "internalType": "address",
+        "name": "agent",
+        "type": "address"
+      },
+      {
+        "indexed": false,
+        "internalType": "int128",
+        "name": "score",
+        "type": "int128"
+      },
+      {
+        "indexed": false,
+        "internalType": "string",
+        "name": "tag",
+        "type": "string"
+      }
+    ],
+    "name": "ReputationUpdated",
+    "type": "event"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "address",
+        "name": "agent",
+        "type": "address"
+      }
+    ],
+    "name": "getAvgRounds",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "bytes32",
+        "name": "dealHash",
+        "type": "bytes32"
+      }
+    ],
+    "name": "getDeal",
+    "outputs": [
+      {
+        "components": [
+          {
+            "internalType": "bytes32",
+            "name": "dealHash",
+            "type": "bytes32"
+          },
+          {
+            "internalType": "address",
+            "name": "buyer",
+            "type": "address"
+          },
+          {
+            "internalType": "address",
+            "name": "seller",
+            "type": "address"
+          },
+          {
+            "internalType": "uint256",
+            "name": "buyerAgentId",
+            "type": "uint256"
+          },
+          {
+            "internalType": "uint256",
+            "name": "sellerAgentId",
+            "type": "uint256"
+          },
+          {
+            "internalType": "string",
+            "name": "resourceUri",
+            "type": "string"
+          },
+          {
+            "internalType": "uint256",
+            "name": "openingBuyerPrice",
+            "type": "uint256"
+          },
+          {
+            "internalType": "uint256",
+            "name": "openingSellerPrice",
+            "type": "uint256"
+          },
+          {
+            "internalType": "uint256",
+            "name": "finalPrice",
+            "type": "uint256"
+          },
+          {
+            "internalType": "uint8",
+            "name": "negotiationRounds",
+            "type": "uint8"
+          },
+          {
+            "components": [
+              {
+                "internalType": "uint64",
+                "name": "responseTimeMs",
+                "type": "uint64"
+              },
+              {
+                "internalType": "uint64",
+                "name": "availabilityBps",
+                "type": "uint64"
+              },
+              {
+                "internalType": "uint64",
+                "name": "validityPeriodSecs",
+                "type": "uint64"
+              }
+            ],
+            "internalType": "struct DealRecord.SLATerms",
+            "name": "sla",
+            "type": "tuple"
+          },
+          {
+            "internalType": "bytes32",
+            "name": "x402TxHash",
+            "type": "bytes32"
+          },
+          {
+            "internalType": "uint64",
+            "name": "timestamp",
+            "type": "uint64"
+          },
+          {
+            "internalType": "bool",
+            "name": "settled",
+            "type": "bool"
+          }
+        ],
+        "internalType": "struct DealRecord.DealAttestation",
+        "name": "",
+        "type": "tuple"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "address",
+        "name": "agent",
+        "type": "address"
+      }
+    ],
+    "name": "getDealCount",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "address",
+        "name": "agent",
+        "type": "address"
+      }
+    ],
+    "name": "getDealsByAgent",
+    "outputs": [
+      {
+        "internalType": "bytes32[]",
+        "name": "dealHashes",
+        "type": "bytes32[]"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "address",
+        "name": "agent",
+        "type": "address"
+      }
+    ],
+    "name": "getTotalVolume",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "identityRegistry",
+    "outputs": [
+      {
+        "internalType": "address",
+        "name": "",
+        "type": "address"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "components": [
+          {
+            "internalType": "bytes32",
+            "name": "dealHash",
+            "type": "bytes32"
+          },
+          {
+            "internalType": "address",
+            "name": "buyer",
+            "type": "address"
+          },
+          {
+            "internalType": "address",
+            "name": "seller",
+            "type": "address"
+          },
+          {
+            "internalType": "uint256",
+            "name": "buyerAgentId",
+            "type": "uint256"
+          },
+          {
+            "internalType": "uint256",
+            "name": "sellerAgentId",
+            "type": "uint256"
+          },
+          {
+            "internalType": "string",
+            "name": "resourceUri",
+            "type": "string"
+          },
+          {
+            "internalType": "uint256",
+            "name": "openingBuyerPrice",
+            "type": "uint256"
+          },
+          {
+            "internalType": "uint256",
+            "name": "openingSellerPrice",
+            "type": "uint256"
+          },
+          {
+            "internalType": "uint256",
+            "name": "finalPrice",
+            "type": "uint256"
+          },
+          {
+            "internalType": "uint8",
+            "name": "negotiationRounds",
+            "type": "uint8"
+          },
+          {
+            "components": [
+              {
+                "internalType": "uint64",
+                "name": "responseTimeMs",
+                "type": "uint64"
+              },
+              {
+                "internalType": "uint64",
+                "name": "availabilityBps",
+                "type": "uint64"
+              },
+              {
+                "internalType": "uint64",
+                "name": "validityPeriodSecs",
+                "type": "uint64"
+              }
+            ],
+            "internalType": "struct DealRecord.SLATerms",
+            "name": "sla",
+            "type": "tuple"
+          },
+          {
+            "internalType": "bytes32",
+            "name": "x402TxHash",
+            "type": "bytes32"
+          },
+          {
+            "internalType": "uint64",
+            "name": "timestamp",
+            "type": "uint64"
+          },
+          {
+            "internalType": "bool",
+            "name": "settled",
+            "type": "bool"
+          }
+        ],
+        "internalType": "struct DealRecord.DealAttestation",
+        "name": "attestation",
+        "type": "tuple"
+      }
+    ],
+    "name": "recordDeal",
+    "outputs": [
+      {
+        "internalType": "bytes32",
+        "name": "dealHash",
+        "type": "bytes32"
+      }
+    ],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "reputationRegistry",
+    "outputs": [
+      {
+        "internalType": "address",
+        "name": "",
+        "type": "address"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "bytes32",
+        "name": "dealHash",
+        "type": "bytes32"
+      },
+      {
+        "internalType": "bytes32",
+        "name": "x402TxHash",
+        "type": "bytes32"
+      }
+    ],
+    "name": "settleDeal",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "bytes32",
+        "name": "dealHash",
+        "type": "bytes32"
+      },
+      {
+        "internalType": "int128",
+        "name": "buyerScore",
+        "type": "int128"
+      },
+      {
+        "internalType": "int128",
+        "name": "sellerScore",
+        "type": "int128"
+      },
+      {
+        "internalType": "string",
+        "name": "tag",
+        "type": "string"
+      }
+    ],
+    "name": "updateReputation",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "bytes32",
+        "name": "dealHash",
+        "type": "bytes32"
+      },
+      {
+        "components": [
+          {
+            "internalType": "bytes32",
+            "name": "dealHash",
+            "type": "bytes32"
+          },
+          {
+            "internalType": "address",
+            "name": "buyer",
+            "type": "address"
+          },
+          {
+            "internalType": "address",
+            "name": "seller",
+            "type": "address"
+          },
+          {
+            "internalType": "uint256",
+            "name": "buyerAgentId",
+            "type": "uint256"
+          },
+          {
+            "internalType": "uint256",
+            "name": "sellerAgentId",
+            "type": "uint256"
+          },
+          {
+            "internalType": "string",
+            "name": "resourceUri",
+            "type": "string"
+          },
+          {
+            "internalType": "uint256",
+            "name": "openingBuyerPrice",
+            "type": "uint256"
+          },
+          {
+            "internalType": "uint256",
+            "name": "openingSellerPrice",
+            "type": "uint256"
+          },
+          {
+            "internalType": "uint256",
+            "name": "finalPrice",
+            "type": "uint256"
+          },
+          {
+            "internalType": "uint8",
+            "name": "negotiationRounds",
+            "type": "uint8"
+          },
+          {
+            "components": [
+              {
+                "internalType": "uint64",
+                "name": "responseTimeMs",
+                "type": "uint64"
+              },
+              {
+                "internalType": "uint64",
+                "name": "availabilityBps",
+                "type": "uint64"
+              },
+              {
+                "internalType": "uint64",
+                "name": "validityPeriodSecs",
+                "type": "uint64"
+              }
+            ],
+            "internalType": "struct DealRecord.SLATerms",
+            "name": "sla",
+            "type": "tuple"
+          },
+          {
+            "internalType": "bytes32",
+            "name": "x402TxHash",
+            "type": "bytes32"
+          },
+          {
+            "internalType": "uint64",
+            "name": "timestamp",
+            "type": "uint64"
+          },
+          {
+            "internalType": "bool",
+            "name": "settled",
+            "type": "bool"
+          }
+        ],
+        "internalType": "struct DealRecord.DealAttestation",
+        "name": "attestation",
+        "type": "tuple"
+      }
+    ],
+    "name": "verifyDealHash",
+    "outputs": [
+      {
+        "internalType": "bool",
+        "name": "",
+        "type": "bool"
+      }
+    ],
+    "stateMutability": "pure",
+    "type": "function"
+  }
+]
