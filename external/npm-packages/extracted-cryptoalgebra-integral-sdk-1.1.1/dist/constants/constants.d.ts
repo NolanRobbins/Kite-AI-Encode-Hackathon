@@ -1,0 +1,3 @@
+export declare const ADDRESS_ZERO = "0x0000000000000000000000000000000000000000";
+export declare const INITIAL_POOL_FEE = 100;
+export declare const DEFAULT_TICK_SPACING = 60;

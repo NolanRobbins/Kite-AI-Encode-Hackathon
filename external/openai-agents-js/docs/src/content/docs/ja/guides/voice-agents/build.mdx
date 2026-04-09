@@ -1,0 +1,277 @@
+---
+title: 音声エージェントの構築
+description: Learn how to build voice agents using the OpenAI Agents SDK, how session behavior works, and which realtime features are available.
+---
+
+import { Aside, Code } from '@astrojs/starlight/components';
+import multiAgentsExample from '../../../../../../../examples/docs/voice-agents/multiAgents.ts?raw';
+import configureSessionExample from '../../../../../../../examples/docs/voice-agents/configureSession.ts?raw';
+import handleAudioExample from '../../../../../../../examples/docs/voice-agents/handleAudio.ts?raw';
+import defineToolExample from '../../../../../../../examples/docs/voice-agents/defineTool.ts?raw';
+import toolApprovalEventExample from '../../../../../../../examples/docs/voice-agents/toolApprovalEvent.ts?raw';
+import guardrailsExample from '../../../../../../../examples/docs/voice-agents/guardrails.ts?raw';
+import guardrailSettingsExample from '../../../../../../../examples/docs/voice-agents/guardrailSettings.ts?raw';
+import audioInterruptedExample from '../../../../../../../examples/docs/voice-agents/audioInterrupted.ts?raw';
+import sessionInterruptExample from '../../../../../../../examples/docs/voice-agents/sessionInterrupt.ts?raw';
+import updateHistoryExample from '../../../../../../../examples/docs/voice-agents/updateHistory.ts?raw';
+import transportEventsExample from '../../../../../../../examples/docs/voice-agents/transportEvents.ts?raw';
+import toolHistoryExample from '../../../../../../../examples/docs/voice-agents/toolHistory.ts?raw';
+import sendMessageExample from '../../../../../../../examples/docs/voice-agents/sendMessage.ts?raw';
+import addImageExample from '../../../../../../../examples/docs/voice-agents/addImage.ts?raw';
+import serverAgentExample from '../../../../../../../examples/docs/voice-agents/serverAgent.ts?raw';
+import delegationAgentExample from '../../../../../../../examples/docs/voice-agents/delegationAgent.ts?raw';
+import turnDetectionExample from '../../../../../../../examples/docs/voice-agents/turnDetection.ts?raw';
+
+<Aside type="caution">
+
+アーキテクチャは早い段階で選んでください:
+
+- `OpenAIRealtimeWebRTC` はブラウザでの最もシンプルな方法で、オーディオ入力 / 出力を自動で処理します
+- `OpenAIRealtimeWebSocket` はより細かく制御できますが、オーディオのキャプチャと再生を自分で管理する必要があります
+- 関数ツールは `RealtimeSession` が実行される場所で動作します。セッションがブラウザで実行される場合、ツールもブラウザで実行されます
+- Realtime ハンドオフは同じライブセッションモデルを維持します。音声変更は、セッションがオーディオ出力を生成する前にのみ有効です。別のバックエンドモデルが必要な場合は、ハンドオフではなくツール経由で委譲してください
+
+</Aside>
+
+## セッション設定
+
+### オーディオ処理
+
+デフォルトの `OpenAIRealtimeWebRTC` のような一部のトランスポート層では、オーディオ入力と出力が自動的に処理されます。`OpenAIRealtimeWebSocket` のような他のトランスポート機構では、セッションオーディオを自分で処理する必要があります:
+
+<Code lang="typescript" code={handleAudioExample} />
+
+基盤のトランスポートが対応している場合、`session.muted` は現在のミュート状態を示し、`session.mute(true | false)` でマイクキャプチャを切り替えます。`OpenAIRealtimeWebSocket` はミュートを実装していません: `session.muted` は `null` を返し、`session.mute()` は例外を投げます。そのため websocket 構成では、クライアント側でキャプチャを停止し、マイクを再び有効にするまで `sendAudio()` の呼び出しを止めてください。
+
+### セッション設定
+
+[`RealtimeSession`](/openai-agents-js/openai/agents-realtime/classes/realtimesession/) を作成するときにセッション自体を設定します。通常は `model` オプションと `config` オブジェクトを使います。`connect(...)` は任意のセッションフィールドではなく、資格情報、エンドポイント URL、SIP 通話アタッチなど接続時の関心事のためのものです。
+
+<Code lang="typescript" code={configureSessionExample} />
+
+内部では、SDK はこの設定を Realtime の [`session.update`](https://developers.openai.com/api/reference/resources/realtime/client-events/#session.update) 形式に正規化します。[RealtimeSessionConfig](/openai-agents-js/openai/agents-realtime/type-aliases/realtimesessionconfig/) に対応プロパティがない生のセッションフィールドが必要な場合は、`providerData` を使うか、`session.transport.sendEvent(...)` で生の `session.update` を送信してください。
+
+`outputModalities`、`audio.input`、`audio.output` を使う新しい SDK 設定形式を推奨します。`modalities`、`inputAudioFormat`、`outputAudioFormat`、`inputAudioTranscription`、`turnDetection` などの旧 SDK エイリアスも後方互換のために引き続き正規化されますが、新しいコードではここで示すネストされた `audio` 構造を使ってください。
+
+speech-to-speech セッションでは、一般的な選択は `outputModalities: ['audio']` です。これによりオーディオ出力に加えて文字起こしが得られます。テキストのみの応答が必要な場合にだけ `['text']` に切り替えてください。
+
+新しいパラメーターで [RealtimeSessionConfig](/openai-agents-js/openai/agents-realtime/type-aliases/realtimesessionconfig/) に対応するパラメーターがない場合は、`providerData` を使えます。`providerData` に渡した内容はすべて、生の `session` オブジェクトの一部として転送されます。
+
+構築時に設定できる追加の `RealtimeSession` オプション:
+
+| Option | Type | Purpose |
+| --- | --- | --- |
+| `context` | `TContext` | セッションコンテキストにマージされる追加のローカルコンテキスト |
+| `historyStoreAudio` | `boolean` | ローカル履歴スナップショットにオーディオデータを保存します（デフォルトは無効） |
+| `outputGuardrails` | `RealtimeOutputGuardrail[]` | セッションの出力ガードレール（[Guardrails](#guardrails) を参照） |
+| `outputGuardrailSettings` | `{ debounceTextLength?: number }` | ガードレール実行頻度。デフォルトは `100`。全文が利用可能になってから 1 回だけ実行するには `-1` を使用 |
+| `tracingDisabled` | `boolean` | セッションのトレーシングを無効化 |
+| `groupId` | `string` | セッション間またはバックエンド実行間でトレースをグループ化。`workflowName` が必要 |
+| `traceMetadata` | `Record<string, any>` | セッショントレースに付与するカスタムメタデータ。`workflowName` が必要 |
+| `workflowName` | `string` | トレースワークフローの表示名 |
+| `automaticallyTriggerResponseForMcpToolCalls` | `boolean` | MCP ツール呼び出し完了時にモデル応答を自動トリガー（デフォルト: `true`） |
+| `toolErrorFormatter` | `ToolErrorFormatter` | モデルに返すツール承認拒否メッセージをカスタマイズ |
+
+`connect(...)` オプション:
+
+| Option | Type | Purpose |
+| --- | --- | --- |
+| `apiKey` | `string \| (() => string \| Promise<string>)` | この接続で使う API キー（または遅延ローダー） |
+| `model` | `OpenAIRealtimeModels \| string` | トランスポートレベルのオプション型に存在します。`RealtimeSession` ではコンストラクターでモデルを設定し、生トランスポートでは接続時モデルも使用可能 |
+| `url` | `string` | 任意のカスタム Realtime エンドポイント URL |
+| `callId` | `string` | 既存の SIP 開始済み通話 / セッションにアタッチ |
+
+### 会話ライフサイクル
+
+`RealtimeSession` は長寿命の Realtime 接続の上に位置します。会話履歴のローカルコピーを保持し、トランスポートイベントを監視し、ツールと出力ガードレールを実行し、アクティブなエージェント設定をトランスポートと同期し続けます。
+
+基盤 API の挙動も重要です:
+
+- 接続成功時は `session.created` イベントで始まり、その後の設定変更で `session.updated` が生成されます
+- ほとんどのセッションプロパティは後から変更できますが、`model` は会話中に変更できません。`voice` はセッションがオーディオ出力を生成する前にのみ変更でき、Realtime API では有効化後にトレーシングを変更できないため、トレーシングは最初に決める必要があります
+- Realtime API は現在、単一セッションを 60 分に制限しています
+- 入力オーディオ文字起こしは非同期なので、最新発話の文字起こしが応答生成開始後に到着することがあります
+
+SDK レイヤーでは `await session.connect()` は「会話開始に十分な準備ができた」ことを意味しますが、正確なタイミングはトランスポートごとに異なります:
+
+- デフォルトのブラウザ WebRTC トランスポートでは、SDK はデータチャネルが開いたらすぐ初期 `session.update` を送り、対応する `session.updated` イベントを待ってから `connect()` を解決しようとします。これは instructions、tools、modalities が適用される前にオーディオがサーバーへ届くことを避けるためです。その確認が来ない場合、`connect()` は短いタイムアウト後にフォールバックで解決されます
+- デフォルトのサーバーサイド WebSocket トランスポートでは、ソケットが開いて初期設定送信が完了した時点で `connect()` が解決されます。そのため対応する `session.updated` イベントは `connect()` 解決後に到着する場合があります
+
+生イベントモデルが必要な場合は、このページとあわせて公式の [Realtime conversations guide](https://developers.openai.com/api/docs/guides/realtime-conversations/) を参照してください。
+
+## インタラクションフロー
+
+### ターン検出と音声アクティビティ検出
+
+デフォルトで Realtime セッションは組み込みの voice activity detection (VAD) を使います。これにより API はユーザーの発話開始 / 停止や応答作成タイミングを判断できます。SDK では `audio.input.turnDetection` で公開されています。
+
+<Code lang="typescript" code={turnDetectionExample} />
+
+よく使われる 2 つのモード:
+
+- `semantic_vad`: より自然なターン境界を目指し、ユーザーがまだ話し終えていないように聞こえる場合は少し長く待機します
+- `server_vad`: しきい値中心で、`threshold`、`prefixPaddingMs`、`silenceDurationMs`、`idleTimeoutMs` などの設定を公開します
+
+ターン境界を自分で管理したい場合は、`audio.input.turnDetection` を `null` に設定してください。基盤動作の詳細は、公式の [voice activity detection guide](https://developers.openai.com/api/docs/guides/realtime-vad/) と [Realtime conversations guide](https://developers.openai.com/api/docs/guides/realtime-conversations/#voice-activity-detection) を参照してください。
+
+### 割り込み
+
+VAD が有効な場合、エージェントの発話にかぶせて話すと現在の応答を中断できます。WebSocket トランスポートでは、SDK は `input_audio_buffer.speech_started` を監視し、ユーザーが実際に聞いた分までアシスタント音声を切り詰め、`audio_interrupted` イベントを発行します。このイベントは、WebSocket 構成で再生を自分で管理する場合に特に有用です。
+
+<Code lang="typescript" code={audioInterruptedExample} />
+
+手動停止ボタンを提供したい場合は、自分で `interrupt()` を呼び出してください:
+
+<Code lang="typescript" code={sessionInterruptExample} />
+
+WebRTC と WebSocket のどちらも進行中応答を停止しますが、低レベルの仕組みはトランスポートごとに異なります。WebRTC はバッファ済み出力オーディオを自動でクリアします。WebSocket 構成ではローカル再生を自分で停止する必要があり、対応する切り詰め / 会話イベントがトランスポートから戻ってきたときにローカル履歴が更新されます。
+
+### テキスト入力
+
+ライブ会話に入力テキストや追加の構造化ユーザーコンテンツを送るには `sendMessage()` を使います。
+
+<Code lang="typescript" code={sendMessageExample} />
+
+これは、テキストと音声を混在させる UI、帯域外コンテキスト注入、または音声入力に明示的なテキスト補足を組み合わせる場合に有用です。
+
+### 画像入力
+
+Realtime speech-to-speech セッションには画像も含められます。SDK では `addImage()` を使って現在の会話に画像を添付します。
+
+<Code lang="typescript" code={addImageExample} />
+
+`triggerResponse: false` を渡すと、モデルに応答を求める前に、画像を後続のテキストまたはオーディオターンとまとめて送れます。これは公式の [Realtime conversations image input guidance](https://developers.openai.com/api/docs/guides/realtime-conversations/#image-inputs) に沿った挙動です。
+
+### 手動応答制御
+
+上位 SDK レイヤーでは、`sendMessage()` と `addImage()` はデフォルトで応答を自動トリガーします。手動応答制御は、生トランスポートイベント、push-to-talk フロー、またはカスタム moderation / validation ステップを扱うときに重要です。
+
+<Code lang="typescript" code={transportEventsExample} />
+
+よくある 2 つのケース:
+
+1. `audio.input.turnDetection = null` で VAD を完全に無効化する場合、オーディオターンのコミットと `response.create` の送信はあなたの責任です
+2. VAD を有効のまま `turnDetection.interruptResponse = false` と `turnDetection.createResponse = false` にする場合、API はターン検出を続けますが応答作成はあなたに委ねられます
+
+2 つ目のパターンは、モデルが応答する前にユーザー入力を検査または moderation したい場合に有用です。公式の [Realtime conversations guidance on disabling automatic responses](https://developers.openai.com/api/docs/guides/realtime-conversations/#keep-vad-but-disable-automatic-responses) と一致します。
+
+## エージェント機能
+
+### ハンドオフ
+
+通常のエージェントと同様に、ハンドオフを使って 1 つのエージェントを複数エージェントに分割し、パフォーマンス向上や問題範囲の明確化のためにエージェントオーケストレーションできます。
+
+<Code lang="typescript" code={multiAgentsExample} />
+
+通常のエージェントと異なり、Realtime Agents のハンドオフは少し異なる挙動です。ハンドオフ実行時、進行中セッションは新しいエージェント設定で更新されます。このため、新しいエージェントは進行中会話履歴に自動でアクセスでき、現在は入力フィルターは適用されません。
+
+セッションはライブのままなので、ハンドオフ中にそのセッションのモデルは変わりません。音声変更は基盤 Realtime API ルールに従い、セッションがオーディオ出力を生成する前のみ有効です。Realtime ハンドオフは主に同一セッション上で `RealtimeAgent` 設定を切り替えるためのものです。たとえば `gpt-5.4` のような reasoning モデルを使うなど別モデルが必要な場合や、non-realtime バックエンドエージェントに委譲する場合は、[delegation through tools](#delegation-through-tools) を使ってください。
+
+### ツール
+
+通常のエージェントと同様に、Realtime Agents はアクション実行のためにツールを呼び出せます。Realtime は **関数ツール**（ローカル実行）と **hosted MCP tools**（Realtime API によりリモート実行）をサポートします。関数ツールは通常のエージェントと同じ `tool()` ヘルパーで定義できます。
+
+<Code lang="typescript" code={defineToolExample} />
+
+#### 関数ツール
+
+関数ツールは `RealtimeSession` と同じ環境で実行されます。つまり、セッションをブラウザで実行しているならツールもブラウザで実行されます。機密性の高い処理が必要な場合は、ツール内からバックエンドを呼び出し、特権処理はサーバーで実行してください。
+
+これにより、ブラウザ側ツールはサーバー側ロジックへの薄いバックチャネルとして機能できます。たとえば [`examples/realtime-next`](https://github.com/openai/openai-agents-js/tree/main/examples/realtime-next) では、ブラウザで `refundBackchannel` ツールを定義し、リクエストと現在会話履歴をサーバーの `handleRefundRequest(...)` に転送します。そこで別の `Runner` が別エージェントやモデルを使って返金評価し、その結果を音声セッションに返します。
+
+#### Hosted MCP tools
+
+Hosted MCP tools は `hostedMcpTool` で設定でき、リモート実行されます。MCP ツールの可用性が変わると、セッションは `mcp_tools_changed` を発行します。MCP ツール呼び出し完了後にセッションがモデル応答を自動トリガーしないようにするには、`automaticallyTriggerResponseForMcpToolCalls: false` を設定します。
+
+現在のフィルタ済み MCP ツール一覧は `session.availableMcpTools` としても利用できます。このプロパティと `mcp_tools_changed` イベントはいずれも、アクティブエージェントで有効な hosted MCP サーバーに対し、エージェント設定の `allowed_tools` フィルター適用後の結果のみを反映します。
+
+Hosted MCP 設定は、安全なサーバー選択、ヘッダー、承認を接続前設定として扱うと理解しやすくなります。`RealtimeSession.connect()` がトランスポートを開く前に、SDK はアクティブエージェントの hosted MCP ツール定義を解決し、対応する MCP フィールドを Realtime API へ送る初期セッション設定に含めます。
+
+このタイミングはブラウザ WebRTC アプリで特に重要です。ephemeral client secret は常にサーバーで発行されるため、秘密にすべき hosted MCP 資格情報やカスタム `headers` は、そのサーバーサイド `POST /v1/realtime/client_secrets` リクエスト内の初期 `session` ペイロードに含めてください。長期資格情報をブラウザコードに置き、`connect()` 開始後に追加する設計は避けてください。
+
+Realtime API レベルでは、後続の `session.update` 呼び出しでツールや他の可変セッションフィールドを変更できますし、SDK 自体もアクティブエージェント変更時に `session.update` を送ります。ただしブラウザアプリでは、安全な Hosted MCP 初期化はサーバーサイドの接続前関心事として扱い、ブラウザ側 `RealtimeSession` 設定をサーバー発行内容と一致させてください。
+
+#### バックグラウンド結果
+
+ツール実行中、エージェントはユーザーからの新規リクエストを処理できません。体験を改善する 1 つの方法は、ツール実行前にエージェントにアナウンスさせる、または時間稼ぎの定型句を話すよう指示することです。
+
+関数ツールが即時に別のモデル応答をトリガーせず完了すべき場合は、`@openai/agents/realtime` の `backgroundResult(output)` を返してください。これによりツール出力はセッションへ返されつつ、応答トリガー制御はあなた側に残ります。
+
+#### タイムアウト
+
+関数ツールのタイムアウトオプション（`timeoutMs`、`timeoutBehavior`、`timeoutErrorFunction`）は Realtime セッションでも同様に機能します。デフォルトの `error_as_result` では、タイムアウトメッセージがツール出力として送られます。`raise_exception` では、セッションは [`ToolTimeoutError`](/openai-agents-js/openai/agents-core/classes/tooltimeouterror) を伴う `error` イベントを発行し、その呼び出しのツール出力は送信されません。
+
+#### 会話履歴へのアクセス
+
+エージェントが特定ツールを呼び出した引数に加えて、Realtime Session が追跡している現在会話履歴のスナップショットにもアクセスできます。これは、会話の現在状態に基づくより複雑な処理が必要な場合や、[tools for delegation](#delegation-through-tools) を使う予定がある場合に有用です。
+
+<Code lang="typescript" code={toolHistoryExample} />
+
+<Aside type="note">
+  渡される履歴は、ツール呼び出し時点の履歴スナップショットです。
+  ユーザーが最後に話した内容の文字起こしは、まだ利用できない場合があります。
+</Aside>
+
+#### ツール実行前の承認
+
+ツールを `needsApproval: true` で定義すると、ツール実行前にエージェントが `tool_approval_requested` イベントを発行します。
+
+このイベントを監視すると、ツール呼び出しを承認または拒否する UI をユーザーに提示できます。
+
+`await session.approve(request.approvalItem)` または `await session.reject(request.approvalItem)` でリクエストを解決します。関数ツールでは `{ alwaysApprove: true }` または `{ alwaysReject: true }` を渡して、その後のセッション中の繰り返し呼び出しに同じ判断を再利用できます。また `session.reject(request.approvalItem, { message: '...' })` で、その特定呼び出し向けのカスタム拒否メッセージをモデルに返せます。Hosted MCP 承認は sticky な承認 / 拒否をサポートしないため、代わりに hosted MCP の `allowedTools` 設定で制限してください。
+
+呼び出しごとの拒否 `message` を渡さない場合、セッションは `toolErrorFormatter`（設定されている場合）を使い、なければ SDK 既定の拒否テキストにフォールバックします。
+
+<Code lang="typescript" code={toolApprovalEventExample} />
+
+<Aside type="note">
+  音声エージェントがツール呼び出し承認を待っている間、エージェントは
+  ユーザーからの新規リクエストを処理できません。
+</Aside>
+
+### ガードレール
+
+ガードレールは、エージェント発話がルール違反したかを監視し、応答を即時停止する仕組みです。これらのチェックはエージェント応答の文字起こしストリームに対して実行されます。オーディオセッションでは SDK は出力オーディオ文字起こしと文字起こしデルタを使うため、重要な前提は別のテキスト出力モダリティではなく文字起こし可用性です。
+
+提供したガードレールは、モデル応答が返る間に非同期実行されるため、たとえば「特定の禁止語に言及した」などの事前定義分類トリガーに基づいて応答を停止できます。
+
+ガードレールが発火すると、セッションは `guardrail_tripped` イベントを発行します。イベントは `details` オブジェクトも提供し、ガードレールを発火させた `itemId` を含みます。
+
+<Code lang="typescript" code={guardrailsExample} />
+
+デフォルトでは、ガードレールは 100 文字ごとと、最終文字起こしが利用可能になった時点で再度実行されます。通常はテキスト生成より発話に時間がかかるため、これによりユーザーが聞く前に安全でない出力を止められる場合があります。
+
+この挙動を変更したい場合は、セッションに `outputGuardrailSettings` オブジェクトを渡せます。
+
+応答末尾で完全生成された文字起こしを 1 回だけ評価したい場合は、`debounceTextLength: -1` を設定してください。
+
+<Code lang="typescript" code={guardrailSettingsExample} />
+
+## 会話状態と委譲
+
+### 会話履歴管理
+
+`RealtimeSession` は、ユーザーメッセージ、アシスタント出力、ツール呼び出し、切り詰め状態を追跡するローカル `history` スナップショットを自動維持します。これを UI に表示したり、ツール内で参照したり、項目修正 / 削除が必要なときに更新したりできます。
+
+会話が変化するとセッションは `history_updated` を発行します。履歴変更を要求するには `updateHistory()` を使います。これはトランスポートに現在履歴との差分計算と必要な delete / create イベント送信を依頼し、対応する会話イベントが戻るとローカル `session.history` ビューが更新されます。
+
+<Code lang="typescript" code={updateHistoryExample} />
+
+#### 制限事項
+
+1. 現在、関数ツール呼び出しは事後編集できません
+2. 履歴内のアシスタントテキストは `output_audio.transcript` を含む利用可能な文字起こしに依存します
+3. 割り込みで切り詰められた応答には最終文字起こしが保持されません
+4. 入力オーディオ文字起こしは、モデルが音声をどう解釈したかの正確な複製ではなく、ユーザー発話の概略として扱うのが適切です
+
+### ツール経由の委譲
+
+![ツール経由の委譲](https://cdn.openai.com/API/docs/diagram-speech-to-speech-agent-tools.png)
+
+会話履歴とツール呼び出しを組み合わせると、より複雑なアクション実行のために別のバックエンドエージェントへ会話を委譲し、その結果をユーザーへ返せます。
+
+<Code lang="typescript" code={delegationAgentExample} />
+
+次のコードはサーバーで実行されます。この例では Next.js Server Action 経由です。
+
+<Code lang="typescript" code={serverAgentExample} />

@@ -1,0 +1,194 @@
+---
+title: 会话
+description: Persist multi-turn conversation history so agents can resume context across runs.
+---
+
+import { Code } from '@astrojs/starlight/components';
+import sessionsQuickstart from '../../../../../../examples/docs/sessions/basicSession.ts?raw';
+import manageHistory from '../../../../../../examples/docs/sessions/manageHistory.ts?raw';
+import customSession from '../../../../../../examples/docs/sessions/customSession.ts?raw';
+import sessionInputCallback from '../../../../../../examples/docs/sessions/sessionInputCallback.ts?raw';
+import responsesCompactionSession from '../../../../../../examples/docs/sessions/responsesCompactionSession.ts?raw';
+import manualCompactionSession from '../../../../../../examples/docs/sessions/responsesCompactionManualSession.ts?raw';
+import memorySessionExample from '../../../../../../examples/docs/sessions/memorySession.ts?raw';
+import resumableRunExample from '../../../../../../examples/docs/sessions/resumableRun.ts?raw';
+
+会话为 Agents SDK 提供了**持久化记忆层**。将任何实现了 `Session` 接口的对象传给 `Runner.run`，其余工作由 SDK 处理。当存在会话时，runner 会自动：
+
+1. 获取此前存储的会话条目，并将其前置到下一轮。
+2. 在每次运行完成后，持久化新的用户输入和助手输出。
+3. 让该会话可用于后续轮次：无论你是以新的用户文本调用 runner，还是从中断的 `RunState` 恢复。
+
+这省去了手动调用 `toInputList()` 或在多轮之间拼接历史记录的需要。TypeScript SDK 内置了两种实现：用于 Conversations API 的 `OpenAIConversationsSession`，以及面向本地开发的 `MemorySession`。由于它们共享 `Session` 接口，你也可以接入自己的存储后端。若要获取 Conversations API 之外的灵感，可查看 `examples/memory/` 下的示例会话后端（Prisma、文件后端等）。当你使用 OpenAI Responses 模型时，可用 `OpenAIResponsesCompactionSession` 包装任意会话，通过 [`responses.compact`](https://platform.openai.com/docs/api-reference/responses/compact) 自动压缩已存储的会话历史。
+
+> 提示：要运行本页中的 `OpenAIConversationsSession` 示例，请设置 `OPENAI_API_KEY` 环境变量（或在构造会话时提供 `apiKey`），以便 SDK 调用 Conversations API。
+
+当你希望 SDK 为你管理客户端侧记忆时，请使用会话。如果你已经在使用
+OpenAI 服务器托管状态（`conversationId` 或 `previousResponseId`），通常不需要再为同一段会话历史额外使用会话。
+
+---
+
+## 入门
+
+### 快速开始
+
+使用 `OpenAIConversationsSession` 与 [Conversations API](https://platform.openai.com/docs/api-reference/conversations) 同步记忆，或替换为任意其他 `Session` 实现。
+
+<Code
+  lang="typescript"
+  code={sessionsQuickstart}
+  title="使用 Conversations API 作为会话记忆"
+/>
+
+复用同一个会话实例可确保智能体在每轮前都能接收完整会话历史，并自动持久化新条目。切换到不同的 `Session` 实现不需要其他代码改动。
+
+对于本地演示、测试或进程内聊天状态，`MemorySession` 提供相同接口，
+且不会与 OpenAI 通信：
+
+<Code
+  lang="typescript"
+  code={memorySessionExample}
+  title="使用 MemorySession 进行本地状态管理"
+/>
+
+`OpenAIConversationsSession` 构造选项：
+
+| 选项             | 类型     | 说明                                      |
+| ---------------- | -------- | ----------------------------------------- |
+| `conversationId` | `string` | 复用现有对话，而不是懒创建新对话。        |
+| `client`         | `OpenAI` | 传入预配置的 OpenAI 客户端。              |
+| `apiKey`         | `string` | 创建内部 OpenAI 客户端时使用的 API 密钥。 |
+| `baseURL`        | `string` | OpenAI 兼容端点的基础 URL。               |
+| `organization`   | `string` | 请求使用的 OpenAI 组织 ID。               |
+| `project`        | `string` | 请求使用的 OpenAI 项目 ID。               |
+
+`MemorySession` 构造选项：
+
+| 选项           | 类型               | 说明                                       |
+| -------------- | ------------------ | ------------------------------------------ |
+| `sessionId`    | `string`           | 用于日志或测试的稳定标识符。默认自动生成。 |
+| `initialItems` | `AgentInputItem[]` | 用现有历史初始化会话。                     |
+| `logger`       | `Logger`           | 覆盖用于调试输出的 logger。                |
+
+`MemorySession` 将所有内容存储在本地进程内存中，因此进程退出后会重置。
+
+如果你需要在构造会话前预先创建 conversation ID，请使用
+`startOpenAIConversationsSession(client?)`，并将返回的 ID 作为 `conversationId` 传入。
+
+---
+
+## 核心会话行为
+
+### runner 使用会话的方式
+
+- **每次运行前**，它会检索会话历史，将其与新一轮输入合并，并把合并后的列表传给你的智能体。
+- **非流式运行后**，一次 `session.addItems()` 调用会同时持久化原始用户输入和该轮最新的模型输出。
+- **流式运行时**，它会先写入用户输入，并在该轮完成后追加流式输出。
+- **从 `RunResult.state` 恢复时**（如审批或其他中断），持续传入同一个 `session`。恢复后的轮次会加入记忆，而无需重新准备输入。
+
+---
+
+### 历史检查与编辑
+
+会话提供简单的 CRUD 辅助方法，你可以据此构建“撤销”“清空聊天”或审计功能。
+
+<Code lang="typescript" code={manageHistory} title="读取并编辑已存储条目" />
+
+`session.getItems()` 返回已存储的 `AgentInputItem[]`。调用 `popItem()` 可移除最后一项——这在你重新运行智能体前进行用户修正时很有用。
+
+---
+
+## 自定义存储与合并行为
+
+### 自带存储后端
+
+实现 `Session` 接口，即可用 Redis、DynamoDB、SQLite 或其他数据存储来承载记忆。只需五个异步方法。
+
+<Code lang="typescript" code={customSession} title="自定义内存会话实现" />
+
+自定义会话让你可以在持久化前执行保留策略、增加加密，或为每轮会话附加元数据。
+
+---
+
+### 控制历史与新条目的合并方式
+
+当你将 `AgentInputItem` 数组作为运行输入时，可提供 `sessionInputCallback`，以确定性方式将其与已存历史合并。runner 会加载现有历史，在**模型调用前**执行你的回调，并将返回数组作为该轮完整输入传给模型。这个钩子非常适合裁剪旧条目、去重工具结果，或仅突出你希望模型看到的上下文。
+
+<Code
+  lang="typescript"
+  code={sessionInputCallback}
+  title="使用 sessionInputCallback 截断历史"
+/>
+
+对于字符串输入，runner 会自动合并历史，因此该回调是可选的。该回调
+仅在你的轮次输入本身就是条目数组时才会运行。
+
+如果你也在使用 `conversationId` 或 `previousResponseId`，请在回调结果中至少保留一条当前轮次的新条目。这些服务器托管 API 依赖当前轮次增量。若
+回调丢弃了所有新条目，SDK 会恢复原始新输入并记录警告，
+而不是发送空增量。
+
+---
+
+## 可恢复运行
+
+### 审批与可恢复运行处理
+
+人工干预流程通常会暂停一次运行以等待审批：
+
+<Code
+  lang="typescript"
+  code={resumableRunExample}
+  title="使用同一会话恢复运行"
+/>
+
+当你从先前的 `RunState` 恢复时，新轮次会追加到同一记忆记录中，以保持单一会话历史。Human-in-the-loop（HITL）流程保持完全兼容——审批检查点仍通过 `RunState` 往返，而会话会保持会话历史完整。
+
+---
+
+## 高级：历史压缩
+
+### 自动压缩 OpenAI Responses 历史
+
+`OpenAIResponsesCompactionSession` 可装饰任意 `Session`，并使用 OpenAI Responses API 将较长的已存历史替换为等价但更短的会话条目列表。每次轮次持久化后，runner 会把最新 `responseId` 传给 `runCompaction`，当你的决策钩子返回 true 时调用 `responses.compact`。根据 `compactionMode`，请求会基于最新的 Responses API 链或会话当前条目构建。默认触发条件是在累计至少 10 条非用户条目后进行压缩；你可重写 `shouldTriggerCompaction`，基于 token 数或自定义启发式规则决定。压缩返回后，装饰器会清空底层会话并写入缩减后的条目列表，因此不要将其与 `OpenAIConversationsSession` 搭配使用，后者采用不同的服务器托管历史流程。
+
+<Code
+  lang="typescript"
+  code={responsesCompactionSession}
+  title="用 OpenAIResponsesCompactionSession 装饰会话"
+/>
+
+`OpenAIResponsesCompactionSession` 构造选项：
+
+| 选项                      | 类型                                          | 说明                                                                                                   |
+| ------------------------- | --------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
+| `client`                  | `OpenAI`                                      | 用于 `responses.compact` 的 OpenAI 客户端。                                                            |
+| `underlyingSession`       | `Session`                                     | 用于清空/重写压缩条目的底层会话存储。默认为用于演示的内存会话，且不得是 `OpenAIConversationsSession`。 |
+| `model`                   | `OpenAI.ResponsesModel`                       | 用于压缩请求的模型。默认使用 SDK 当前默认 OpenAI 模型。                                                |
+| `compactionMode`          | `'auto' \| 'previous_response_id' \| 'input'` | 控制压缩是使用服务器响应链还是本地输入条目。                                                           |
+| `shouldTriggerCompaction` | `(context) => boolean \| Promise<boolean>`    | 自定义触发钩子，基于 `responseId`、`compactionMode`、候选条目和当前会话条目。                          |
+
+当你已经使用 Responses API 的 response ID 链接轮次时，
+`compactionMode: 'previous_response_id'` 很有用。`compactionMode: 'input'` 则改为基于当前
+会话条目重建压缩请求，这在响应链不可用或你希望以
+底层会话内容为唯一真相来源时很有帮助。
+
+`runCompaction(args)` 选项：
+
+| 选项             | 类型                                          | 说明                                                            |
+| ---------------- | --------------------------------------------- | --------------------------------------------------------------- |
+| `responseId`     | `string`                                      | `previous_response_id` 模式下最新的 Responses API response id。 |
+| `compactionMode` | `'auto' \| 'previous_response_id' \| 'input'` | 按次调用覆盖已配置模式（可选）。                                |
+| `store`          | `boolean`                                     | 指示上一次运行是否存储了服务器状态。                            |
+| `force`          | `boolean`                                     | 跳过 `shouldTriggerCompaction` 并立即压缩。                     |
+
+#### 低延迟流式场景下的手动压缩
+
+压缩会清空并重写底层会话，因此 SDK 会在流式运行结束前等待它完成。若压缩开销较大，`result.completed` 可能会在最后一个输出 token 后继续等待数秒。若要低延迟流式体验或更快轮转，可禁用自动压缩，并在轮次之间（或空闲时）自行调用 `runCompaction`。
+
+<Code
+  lang="typescript"
+  code={manualCompactionSession}
+  title="禁用自动压缩并在轮次之间执行压缩"
+/>
+
+你可以随时调用 `runCompaction({ force: true })`，在归档或交接前压缩历史。启用 `DEBUG=openai-agents:openai:compaction` 调试日志可追踪压缩决策。
