@@ -8,6 +8,7 @@ strings when the OpenAI API is unavailable.
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -47,11 +48,20 @@ class OfferGenerator:
         api_key: str = "",
         model: str = "gpt-4o-mini",
         max_tokens: int = 256,
+        model_mode: str = "policy_only",
+        provider: str = "template",
+        latency_budget_ms: int = 1200,
     ) -> None:
+        self.model_mode = model_mode
+        self.provider = provider
         self.model = model
         self.max_tokens = max_tokens
+        self.latency_budget_ms = latency_budget_ms
+        self.call_count = 0
+        self.total_latency_ms = 0.0
+        self.fallback_count = 0
         self._client: Any = None
-        if api_key and _HAS_OPENAI:
+        if api_key and _HAS_OPENAI and model_mode in {"llm", "reasoning_llm"}:
             self._client = OpenAI(api_key=api_key)
 
     # ------------------------------------------------------------------
@@ -121,7 +131,9 @@ class OfferGenerator:
 
     def _complete(self, user_prompt: str, fallback: str) -> str:
         if self._client is None:
+            self.fallback_count += 1
             return fallback
+        started = time.perf_counter()
         try:
             resp = self._client.chat.completions.create(
                 model=self.model,
@@ -132,13 +144,33 @@ class OfferGenerator:
                 max_tokens=self.max_tokens,
                 temperature=0.7,
             )
+            elapsed_ms = (time.perf_counter() - started) * 1000.0
+            self.call_count += 1
+            self.total_latency_ms += elapsed_ms
             text = resp.choices[0].message.content
             if text:
                 return text.strip()
+            self.fallback_count += 1
             return fallback
         except Exception:
+            self.fallback_count += 1
             logger.warning("OpenAI call failed, using template fallback", exc_info=True)
             return fallback
+
+    def runtime_metrics(self) -> dict[str, Any]:
+        """Return model/runtime telemetry safe to show in the dashboard."""
+        avg_latency = self.total_latency_ms / self.call_count if self.call_count else 0.0
+        return {
+            "model_mode": self.model_mode,
+            "provider": self.provider,
+            "model": self.model,
+            "model_calls": self.call_count,
+            "fallback_messages": self.fallback_count,
+            "avg_model_latency_ms": round(avg_latency, 2),
+            "total_model_latency_ms": round(self.total_latency_ms, 2),
+            "latency_budget_ms": self.latency_budget_ms,
+            "runtime_note": _runtime_note(self.model_mode),
+        }
 
 
 def _fmt_context(ctx: dict[str, Any] | None) -> str:
@@ -146,3 +178,13 @@ def _fmt_context(ctx: dict[str, Any] | None) -> str:
         return "none"
     parts = [f"{k}={v}" for k, v in ctx.items()]
     return ", ".join(parts)
+
+
+def _runtime_note(model_mode: str) -> str:
+    if model_mode == "reasoning_llm":
+        return "Reasoning advisor mode can improve strategy critique but increases round latency."
+    if model_mode == "llm":
+        return "LLM narrator mode enriches dialogue while typed protocol fields remain authoritative."
+    if model_mode == "slm":
+        return "SLM narrator mode uses lightweight/template language around deterministic policy decisions."
+    return "Policy-only mode uses deterministic negotiation state and template language."

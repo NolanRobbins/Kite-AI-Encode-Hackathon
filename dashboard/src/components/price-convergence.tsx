@@ -14,13 +14,17 @@ import {
   Legend,
   Dot,
 } from "recharts";
-import type { NegotiationRound } from "@/lib/mock-data";
-import { DEAL_PRICE } from "@/lib/mock-data";
 
 interface PriceConvergenceProps {
-  rounds: NegotiationRound[];
+  rounds: Array<{
+    round: number;
+    buyerPrice: number | null;
+    sellerPrice: number | null;
+  }>;
   visibleRounds: number;
   dealReached: boolean;
+  finalPrice?: number;
+  nashPrice?: number;
   className?: string;
 }
 
@@ -82,6 +86,8 @@ export function PriceConvergenceChart({
   rounds,
   visibleRounds,
   dealReached,
+  finalPrice,
+  nashPrice,
   className = "",
 }: PriceConvergenceProps) {
   const chartData = useMemo(() => {
@@ -98,11 +104,11 @@ export function PriceConvergenceChart({
       ...chartData,
       {
         round: rounds.length + 1,
-        buyerPrice: DEAL_PRICE,
-        sellerPrice: DEAL_PRICE,
+        buyerPrice: finalPrice ?? chartData.at(-1)?.buyerPrice ?? 0,
+        sellerPrice: finalPrice ?? chartData.at(-1)?.sellerPrice ?? 0,
       },
     ];
-  }, [chartData, dealReached, rounds.length]);
+  }, [chartData, dealReached, finalPrice, rounds.length]);
 
   const finalData = dealReached ? dealData : chartData;
 
@@ -121,7 +127,7 @@ export function PriceConvergenceChart({
           <div className="flex items-center gap-2 bg-[var(--color-deal-bg)] border border-[var(--color-deal-dim)] px-3 py-1.5 rounded-full">
             <div className="w-2 h-2 rounded-full bg-[var(--color-deal)] animate-pulse-slow" />
             <span className="text-xs font-mono font-medium text-[var(--color-deal)]">
-              DEAL @ ${DEAL_PRICE.toFixed(4)}
+              DEAL @ ${(finalPrice ?? 0).toFixed(4)}
             </span>
           </div>
         )}
@@ -150,15 +156,17 @@ export function PriceConvergenceChart({
           <CartesianGrid strokeDasharray="3 3" stroke="#1f2230" vertical={false} />
 
           {/* Nash equilibrium zone */}
-          <ReferenceArea
-            y1={0.09}
-            y2={0.11}
-            fill="#22d3ee"
-            fillOpacity={0.04}
-            stroke="#22d3ee"
-            strokeOpacity={0.1}
-            strokeDasharray="4 4"
-          />
+          {nashPrice && (
+            <ReferenceArea
+              y1={Math.max(0, nashPrice * 0.95)}
+              y2={nashPrice * 1.05}
+              fill="#22d3ee"
+              fillOpacity={0.04}
+              stroke="#22d3ee"
+              strokeOpacity={0.1}
+              strokeDasharray="4 4"
+            />
+          )}
 
           <XAxis
             dataKey="round"
@@ -191,12 +199,12 @@ export function PriceConvergenceChart({
           {/* Deal reference line */}
           {dealReached && (
             <ReferenceLine
-              y={DEAL_PRICE}
+              y={finalPrice ?? 0}
               stroke="#22c55e"
               strokeDasharray="6 3"
               strokeWidth={1.5}
               label={{
-                value: `Deal $${DEAL_PRICE.toFixed(4)}`,
+                value: `Deal $${(finalPrice ?? 0).toFixed(4)}`,
                 position: "right",
                 fill: "#22c55e",
                 fontSize: 11,

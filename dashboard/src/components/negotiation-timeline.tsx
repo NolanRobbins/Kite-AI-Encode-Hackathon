@@ -1,20 +1,48 @@
 "use client";
 
 import { motion } from "framer-motion";
-import type { NegotiationRound } from "@/lib/mock-data";
-import { DEAL_PRICE } from "@/lib/mock-data";
+import type { ReasoningSummary } from "@/lib/types";
 
 interface TimelineProps {
-  rounds: NegotiationRound[];
+  rounds: Array<{
+    round: number;
+    buyerPrice: number | null;
+    sellerPrice: number | null;
+    buyerMessage: string;
+    sellerMessage: string;
+    buyerStance?: string;
+    sellerStance?: string;
+    buyerReasoning?: ReasoningSummary;
+    sellerReasoning?: ReasoningSummary;
+    nashCheck?: string;
+    nashDeviationPct?: number;
+  }>;
   visibleRounds: number;
   dealReached: boolean;
+  finalPrice?: number;
   className?: string;
+}
+
+function ReasoningMini({ reasoning }: { reasoning?: ReasoningSummary }) {
+  if (!reasoning) return null;
+  return (
+    <div className="mt-2 grid gap-1 border-t border-white/5 pt-2">
+      {[reasoning.goal, reasoning.signal, reasoning.action, reasoning.risk]
+        .filter(Boolean)
+        .map((line) => (
+          <div key={line} className="text-[10px] leading-snug text-[var(--color-text-faint)]">
+            {line}
+          </div>
+        ))}
+    </div>
+  );
 }
 
 export function NegotiationTimeline({
   rounds,
   visibleRounds,
   dealReached,
+  finalPrice,
   className = "",
 }: TimelineProps) {
   return (
@@ -36,6 +64,18 @@ export function NegotiationTimeline({
               <div className="text-[10px] font-mono text-[var(--color-text-faint)] uppercase tracking-widest">
                 Round {round.round}
               </div>
+                {round.nashCheck && (
+                  <span className={`text-[9px] font-mono px-1.5 py-0.5 rounded-full border ${
+                    round.nashCheck === "PASS"
+                      ? "text-[var(--color-deal)] border-[var(--color-deal-dim)] bg-[var(--color-deal-bg)]"
+                      : "text-[var(--color-warning)] border-yellow-900 bg-yellow-950/30"
+                  }`}>
+                    {round.nashCheck}
+                    {typeof round.nashDeviationPct === "number"
+                      ? ` ${(round.nashDeviationPct * 100).toFixed(1)}%`
+                      : ""}
+                  </span>
+                )}
               <div className="flex-1 h-px bg-[var(--color-border-subtle)]" />
             </div>
 
@@ -48,12 +88,18 @@ export function NegotiationTimeline({
                 <div className="bg-[var(--color-buyer-bg)] border border-[rgba(59,130,246,0.15)] rounded-lg rounded-tl-sm px-3 py-2">
                   <div className="flex items-center gap-2 mb-1">
                     <span className="font-mono text-xs font-semibold text-[var(--color-buyer)]">
-                      ${round.buyerPrice.toFixed(4)}
+                      ${round.buyerPrice?.toFixed(4) ?? "----"}
                     </span>
+                    {round.buyerStance && (
+                      <span className="text-[9px] uppercase tracking-wider text-[var(--color-buyer)]">
+                        {round.buyerStance}
+                      </span>
+                    )}
                   </div>
                   <p className="text-xs text-[var(--color-text-muted)] leading-relaxed">
                     {round.buyerMessage}
                   </p>
+                  <ReasoningMini reasoning={round.buyerReasoning} />
                 </div>
               </div>
             </div>
@@ -63,13 +109,19 @@ export function NegotiationTimeline({
               <div className="flex-1 max-w-[85%] flex justify-end">
                 <div className="bg-[var(--color-seller-bg)] border border-[rgba(168,85,247,0.15)] rounded-lg rounded-tr-sm px-3 py-2">
                   <div className="flex items-center gap-2 mb-1 justify-end">
+                    {round.sellerStance && (
+                      <span className="text-[9px] uppercase tracking-wider text-[var(--color-seller)]">
+                        {round.sellerStance}
+                      </span>
+                    )}
                     <span className="font-mono text-xs font-semibold text-[var(--color-seller)]">
-                      ${round.sellerPrice.toFixed(4)}
+                      ${round.sellerPrice?.toFixed(4) ?? "----"}
                     </span>
                   </div>
                   <p className="text-xs text-[var(--color-text-muted)] leading-relaxed text-right">
                     {round.sellerMessage}
                   </p>
+                  <ReasoningMini reasoning={round.sellerReasoning} />
                 </div>
               </div>
               <div className="w-6 h-6 rounded-full bg-[var(--color-seller-bg)] border border-[var(--color-seller-dim)] flex items-center justify-center flex-shrink-0 mt-0.5">
@@ -97,7 +149,7 @@ export function NegotiationTimeline({
                 Deal Agreed
               </div>
               <div className="font-mono text-lg font-bold text-[var(--color-deal)]">
-                ${DEAL_PRICE.toFixed(4)} USDT
+                ${(finalPrice ?? 0).toFixed(4)} USDT
               </div>
               <div className="text-[10px] text-[var(--color-text-faint)] mt-1">
                 Recorded on Kite AI • 6 rounds • Jan 18, 2025 14:32 UTC

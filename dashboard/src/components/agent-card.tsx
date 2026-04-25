@@ -7,10 +7,19 @@ import { useState } from "react";
 
 interface AgentCardProps {
   agent: Agent;
+  gridEnabled?: boolean;
+  tendency?: string;
+  objectiveMode?: string;
   delay?: number;
 }
 
-export function AgentCard({ agent, delay = 0 }: AgentCardProps) {
+export function AgentCard({
+  agent,
+  gridEnabled = true,
+  tendency = "balanced",
+  objectiveMode = "fairness_guardrail",
+  delay = 0,
+}: AgentCardProps) {
   const [copied, setCopied] = useState(false);
   const isBuyer = agent.role === "buyer";
   const accent = isBuyer ? "var(--color-buyer)" : "var(--color-seller)";
@@ -123,7 +132,12 @@ export function AgentCard({ agent, delay = 0 }: AgentCardProps) {
           </div>
           <div className="flex items-center gap-1.5">
             <Shield size={12} style={{ color: accent }} />
-            <span className="text-xs text-[var(--color-text-muted)]">{agent.strategy}</span>
+            <span className="text-xs text-[var(--color-text-muted)]">
+              {gridEnabled ? "NegotiatorGrid" : "Baseline"} · {tendency}
+            </span>
+          </div>
+          <div className="mt-1 text-[10px] text-[var(--color-text-faint)]">
+            Objective: {objectiveMode.replaceAll("_", " ")}
           </div>
         </div>
       </div>

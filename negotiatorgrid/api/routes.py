@@ -51,6 +51,8 @@ class AgentConfigSchema(BaseModel):
     strategy: str = "aspiration"
     concession_rate: float = 0.05
     reputation_score: float = 50.0
+    grid_enabled: bool = True
+    tendency: str = ""
 
 
 class NegotiationParamsSchema(BaseModel):
@@ -58,6 +60,12 @@ class NegotiationParamsSchema(BaseModel):
     timeout_seconds: int = Field(default=30, ge=5, le=300)
     resource_uri: str = "/api/service"
     scope: str = "weather-data"
+    objective_mode: str = "fairness_guardrail"
+    passport_status: str = "stubbed"
+    model_mode: str = "policy_only"
+    model_provider: str = "template"
+    model_name: str = "template"
+    model_latency_budget_ms: int = Field(default=1200, ge=100, le=30000)
 
 
 class NegotiateRequest(BaseModel):
@@ -86,6 +94,8 @@ async def _run_negotiation(negotiation_id: str, req: NegotiateRequest) -> None:
         strategy=req.buyer_config.strategy,
         concession_rate=req.buyer_config.concession_rate,
         reputation_score=req.buyer_config.reputation_score,
+        grid_enabled=req.buyer_config.grid_enabled,
+        tendency=req.buyer_config.tendency,
     )
     seller = AgentConfig(
         agent_id=req.seller_config.agent_id or f"seller-{uuid.uuid4().hex[:6]}",
@@ -96,12 +106,20 @@ async def _run_negotiation(negotiation_id: str, req: NegotiateRequest) -> None:
         strategy=req.seller_config.strategy,
         concession_rate=req.seller_config.concession_rate,
         reputation_score=req.seller_config.reputation_score,
+        grid_enabled=req.seller_config.grid_enabled,
+        tendency=req.seller_config.tendency,
     )
     params = NegotiationParams(
         max_rounds=req.negotiation_params.max_rounds,
         timeout_seconds=req.negotiation_params.timeout_seconds,
         resource_uri=req.negotiation_params.resource_uri,
         scope=req.negotiation_params.scope,
+        objective_mode=req.negotiation_params.objective_mode,
+        passport_status=req.negotiation_params.passport_status,
+        model_mode=req.negotiation_params.model_mode,
+        model_provider=req.negotiation_params.model_provider,
+        model_name=req.negotiation_params.model_name,
+        model_latency_budget_ms=req.negotiation_params.model_latency_budget_ms,
     )
 
     # Wire up broadcaster callbacks
@@ -134,6 +152,9 @@ async def _run_negotiation(negotiation_id: str, req: NegotiateRequest) -> None:
                 "seller_agent": seller.agent_id,
                 "buyer_utility": result.buyer_utility,
                 "seller_utility": result.seller_utility,
+                "metrics": result.metrics,
+                "objective_mode": result.objective_mode,
+                "passport_status": result.passport_status,
                 "timestamp": time.time(),
                 "settled": False,
                 "attestation_tx": "",
@@ -241,4 +262,5 @@ async def get_stats() -> dict[str, Any]:
         "total_deals": _stats["total_deals"],
         "avg_rounds": round(avg_rounds, 1),
         "total_volume": round(_stats["total_volume"], 6),
+        "passport_status": "stubbed",
     }
