@@ -117,10 +117,10 @@ export function PriceConvergenceChart({
       <div className="flex items-center justify-between mb-4">
         <div>
           <h3 className="text-sm font-semibold text-[var(--color-text)]">
-            Price Convergence
+            Bilateral Barter Curve
           </h3>
           <p className="text-xs text-[var(--color-text-faint)] mt-0.5">
-            Buyer and seller price trajectories across negotiation rounds
+            Independent buyer and seller offers moving toward an accepted price
           </p>
         </div>
         {dealReached && (
@@ -133,7 +133,7 @@ export function PriceConvergenceChart({
         )}
       </div>
 
-      <ResponsiveContainer width="100%" height={320}>
+      <ResponsiveContainer width="100%" height={380}>
         <LineChart data={finalData} margin={{ top: 10, right: 30, left: 10, bottom: 5 }}>
           <defs>
             <linearGradient id="buyerGradient" x1="0" y1="0" x2="1" y2="0">

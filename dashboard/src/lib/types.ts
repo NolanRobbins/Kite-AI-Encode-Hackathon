@@ -50,6 +50,10 @@ export interface ModelRuntimeMetrics {
 }
 
 export interface SandboxPosture {
+  buyer_agent_isolated?: boolean;
+  seller_agent_isolated?: boolean;
+  shared_private_state?: boolean;
+  transport?: string;
   llm_tool_access?: string;
   filesystem_access?: string;
   network_access?: string;
@@ -70,6 +74,19 @@ export interface EdgeCaseStatus {
   mcp_policy?: string;
 }
 
+export interface PassportSessionFit {
+  mode?: "live" | "mock";
+  status?: "pass" | "fail" | "pending";
+  negotiated_price?: number;
+  remaining_budget?: number;
+  per_payment_cap?: number;
+  merchant?: string;
+  payee?: string;
+  asset?: string;
+  ttl_seconds?: number;
+  reason?: string;
+}
+
 export interface DealMetrics {
   buyer_surplus?: number;
   seller_surplus?: number;
@@ -87,6 +104,7 @@ export interface DealMetrics {
   model_runtime?: ModelRuntimeMetrics;
   sandbox?: SandboxPosture;
   edge_case_status?: EdgeCaseStatus;
+  passport_session_fit?: PassportSessionFit;
 }
 
 export interface NegotiationResult {

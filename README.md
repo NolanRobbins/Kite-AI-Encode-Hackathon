@@ -1,6 +1,6 @@
 # NegotiatorGrid
 
-**Agent-to-agent price negotiation protocol with game-theoretic strategies, x402 settlement, and on-chain attestation on Kite AI.**
+**Agent-to-agent procurement protocol with game-theoretic negotiation, Kite Agent Passport payment authorization, x402 settlement, and on-chain attestation on Kite AI.**
 
 [![Kite Testnet](https://img.shields.io/badge/Kite_Testnet-Chain_2368-blue)](<https://testnet.kitescan.ai>)
 [![Python](https://img.shields.io/badge/Python-3.11+-green)](<https://python.org>)
@@ -29,7 +29,9 @@ NegotiatorGrid fills that gap.
 
 ## The Solution
 
-NegotiatorGrid adds a **negotiation phase before x402 settlement**. Instead of fixed pricing, agents discover each other via MCP, verify on-chain identities, negotiate price through multi-round game-theoretic bargaining, settle payments atomically via x402, and attest every deal on Kite's blockchain.
+NegotiatorGrid adds a **negotiation phase before Passport-authorized x402 settlement**. Instead of fixed pricing, agents discover services via MCP, verify identities and reputation, negotiate price and terms through multi-round game-theoretic bargaining, bind the accepted deal to a Passport-compatible payment intent, settle via x402, and attest every deal on Kite's blockchain.
+
+**Product claim:** NegotiatorGrid extends Kite Agent Passport from "authorized agent payments" to **authorized agent procurement**. Passport controls whether an agent is allowed to spend; NegotiatorGrid decides whether the deal is good, fair, bounded, and safe enough to pay.
 
 ### 6-Stage Pipeline
 
@@ -37,8 +39,8 @@ NegotiatorGrid adds a **negotiation phase before x402 settlement**. Instead of f
 1. Discovery    → Agent queries Kite MCP server, finds counterparty capabilities
 2. Identity     → ERC-8004 on-chain identity resolved, reputation score retrieved
 3. Negotiation  → NegMAS bilateral bargaining (SAO protocol, Boulware concession)
-4. Binding      → Agreed price → x402 PaymentRequirements + ERC-4337 session key
-5. Settlement   → x402 payment flow via Kite Facilitator on Kite testnet
+4. Binding      → Agreed price → Passport Session check + payment intent
+5. Settlement   → Passport-authorized x402 payment via Kite Facilitator
 6. Attestation  → DealRecord written on-chain with negotiation metadata
 ```
 
@@ -77,10 +79,10 @@ NegotiatorGrid adds a **negotiation phase before x402 settlement**. Instead of f
 │  │       strategy      │    │    settle                       │  │
 │  │    O: Opponent      │    │  - fast-x402 seller middleware  │  │
 │  │       modeling      │    │                                 │  │
-│  │    A: Acceptance    │    │  AA Wallet (ERC-4337)           │  │
-│  │       criteria      │    │  - Session key spending limit   │  │
-│  │                     │    │    = negotiated price            │  │
-│  │  LLM Reasoning      │    │  - UserOperation construction  │  │
+│  │    A: Acceptance    │    │  Kite Agent Passport            │  │
+│  │       criteria      │    │  - Session budget + policy      │  │
+│  │                     │    │    check against final deal      │  │
+│  │  LLM Reasoning      │    │  - Delegated payment intent     │  │
 │  │  - Natural language │    │                                 │  │
 │  │    offer generation │    │  Kite Facilitator               │  │
 │  │  - Context-aware    │    │  - 0x1234...3C78b              │  │
@@ -132,10 +134,11 @@ NegotiatorGrid adds a **negotiation phase before x402 settlement**. Instead of f
                   Round 2: Agent B counters $0.12 (opponent model updates)
                   Round 3: Agent A concedes to $0.10 (gambit validates Nash)
                   Round 4: Agent B accepts (acceptance criteria met)
-4. Binding      Agreed price ($0.10) → x402 PaymentRequirements constructed →
-                ERC-4337 session key created with spending limit = $0.10
-5. Settlement   x402 payment flow: 402 → X-PAYMENT header → Kite Facilitator
-                verifies → settles on Kite testnet
+4. Binding      Agreed price ($0.10) → typed payment intent constructed →
+                checked against the user's active Kite Passport Session
+                (budget, merchant, asset, TTL, per-payment amount)
+5. Settlement   x402 payment flow: 402 → X-PAYMENT header → Kite Passport
+                authorization → Kite Facilitator verifies and settles
 6. Attestation  DealRecord.recordDeal() called with negotiation metadata →
                 on-chain event emitted → reputation updated
 ```
@@ -150,7 +153,8 @@ NegotiatorGrid adds a **negotiation phase before x402 settlement**. Instead of f
 - **LLM natural language offers** — GPT-4o-mini generates human-readable offer explanations with context-aware persuasion arguments
 - **ERC-8004 agent identity** — On-chain ERC-721 agent registration with structured reputation scores that feed into negotiation strategy parameters
 - **Reputation-conditioned strategies** — Agents adjust concession speed, initial offers, and walk-away thresholds based on counterparty's on-chain reputation
-- **x402 payment settlement** — Negotiated price flows directly into x402 PaymentRequirements; settled atomically on Kite testnet via the Kite Facilitator
+- **Passport-bounded payment authorization** — Negotiated price is converted into a typed payment intent and checked against the user's active Kite Agent Passport Session before x402 settlement
+- **x402 payment settlement** — Accepted deals settle through Kite's x402-compatible payment flow via the Kite Facilitator
 - **DealRecord on-chain attestation** — Every deal is permanently recorded with buyer/seller identities, agreed price, round count, terms hash, and x402 tx hash
 - **Real-time dashboard** — Next.js frontend with live price convergence visualization, agent identity cards, and deal history
 
@@ -268,11 +272,11 @@ Agents discover counterparties, exchange offers, and finalize deals through MCP 
 
 > *Prior art gap*: Soni et al. [8] use MCP for enterprise data integration (human-facing). Li & Xie [9] identify "semantic negotiation mechanisms" as a needed advancement but don't implement any. **No system uses MCP as agent-to-agent negotiation transport.**
 
-### 4. ERC-4337 Session Keys Derived from Negotiation Outcomes
+### 4. Passport Session-Aware Procurement
 
-After negotiation concludes, the agreed price is encoded into an ERC-4337 UserOperation with a session key whose spending limit equals exactly the negotiated amount. The wallet physically cannot overspend.
+After negotiation concludes, the agreed price is encoded into a typed payment intent and checked against the user's active Kite Agent Passport Session: remaining budget, per-payment cap, merchant restriction, asset type, and expiration. The agent cannot convert a better-looking negotiation transcript into an unauthorized payment.
 
-> *Prior art gap*: The SoK [1, Section 4.2] discusses static ERC-4337 spending limits. **No system derives session key limits dynamically from negotiation outcomes.**
+> *Prior art gap*: The SoK [1, Section 5.6] calls out that payable conditions should be formed across interaction, not assumed up front. **No system binds negotiated commercial terms to Passport-style delegated payment authorization.**
 
 ### 5. Anti-Collusion via On-Chain Deal Attestation
 
@@ -305,6 +309,10 @@ cp .env.example .env
 | `OPENAI_API_KEY` | OpenAI API key for LLM offer generation | — |
 | `OPENAI_MODEL` | LLM model for natural language offers | `gpt-4o-mini` |
 | `KITE_MCP_ENDPOINT` | Kite MCP server endpoint | `https://neo.dev.gokite.ai/v1/mcp` |
+| `KITE_MCP_AUTH_TOKEN` | Optional Passport MCP auth token for live mode | — |
+| `KITE_PASSPORT_MODE` | `mock` or `live`; controls Passport integration labeling | `mock` |
+| `KITE_PASSPORT_AGENT_ID` | Optional Kite Passport Agent ID for live MCP flows | — |
+| `KITE_PASSPORT_SESSION_ID` | Optional active Passport Session ID for live demo checks | — |
 | `API_HOST` | API server bind address | `0.0.0.0` |
 | `API_PORT` | API server port | `8000` |
 
@@ -346,7 +354,7 @@ cd contracts && npx hardhat test           # 17 tests
 | [NegMAS](https://github.com/yasserfarouk/negmas) | Bilateral negotiation engine (SAO protocol) | Battle-tested through all ANAC competitions; BOA architecture separates bidding, opponent modeling, and acceptance |
 | [pygambit](https://github.com/gambitproject/gambit) | Nash equilibrium computation | Standard game theory library; Lemke-Howson algorithm for 2-player games |
 | [web3.py](https://github.com/ethereum/web3.py) | Blockchain interaction | Standard Python Ethereum library |
-| [eth-account](https://github.com/ethereum/eth-account) | ERC-4337 UserOperation signing | Transaction signing and account abstraction |
+| [eth-account](https://github.com/ethereum/eth-account) | Payment and attestation signing | Transaction signing and account abstraction primitives |
 | [OpenAI SDK](https://github.com/openai/openai-python) | Natural language offer generation | GPT-4o-mini for cost-effective per-round LLM calls |
 | [FastAPI](https://fastapi.tiangolo.com/) | REST API + WebSocket server | Async-native, OpenAPI docs, WebSocket support |
 | [Hardhat](https://hardhat.org/) | Smart contract development + testing | Industry-standard Solidity toolchain |
@@ -361,8 +369,9 @@ cd contracts && npx hardhat test           # 17 tests
 | Primitive | How NegotiatorGrid Uses It |
 |-----------|---------------------------|
 | **Kite Chain** (Chain ID 2368) | All smart contracts deployed here; DealRecord attestation, IdentityRegistry, ReputationRegistry |
-| **x402 Protocol** | Payment settlement after negotiation — agreed price flows into PaymentRequirements, settled via Kite Facilitator |
-| **MCP** (Kite MCP Server) | Agent discovery — buyer finds seller capabilities via `https://neo.dev.gokite.ai/v1/mcp` |
+| **Kite Agent Passport** | User/agent identity, Sessions, Delegations, payment authorization, and dashboard audit trail for bounded agent spend |
+| **x402 Protocol** | Payment settlement after negotiation — agreed price flows into a Passport-authorized payment intent and x402 payment header |
+| **MCP** (Kite MCP Server) | Agent discovery and Passport payment tooling — buyer finds service capabilities, gets payer address, and requests payment authorization |
 | **ERC-8004** | Agent identity — ERC-721 tokenized agent entries with reputation scores that condition negotiation strategies |
 | **Kite Facilitator** | x402 verify + settle endpoint at `0x12343e649e6b2b2b77649DFAb88f103c02F3C78b` |
 | **Kite Test USDT** | Settlement currency for agent-to-agent payments at `0x0fF5393387ad2f9f691FD6Fd28e07E3969e27e63` |

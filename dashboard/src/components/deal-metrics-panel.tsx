@@ -1,6 +1,7 @@
 "use client";
 
 import { Scale, ShieldCheck, TriangleAlert } from "lucide-react";
+import { PassportSessionFitCard } from "@/components/passport-session-fit-card";
 import type { DealMetrics, PassportStatus } from "@/lib/types";
 
 function money(value?: number) {
@@ -65,7 +66,7 @@ export function DealMetricsPanel({
       </div>
 
       <div className="mt-4 flex items-start gap-2 rounded-lg border border-[var(--color-border-subtle)] bg-[#0f1117] p-3">
-        {passportStatus === "stubbed" ? (
+        {passportStatus === "disabled" ? (
           <TriangleAlert size={14} className="mt-0.5 text-[var(--color-warning)]" />
         ) : (
           <ShieldCheck size={14} className="mt-0.5 text-[var(--color-deal)]" />
@@ -75,10 +76,12 @@ export function DealMetricsPanel({
             Kite Passport: {passportStatus}
           </div>
           <div className="text-[10px] text-[var(--color-text-faint)]">
-            Passport authorization is isolated behind an adapter while Kite releases the live flow; negotiation, metrics, and guardrails are active now.
+            Passport controls whether the agent can spend; NegotiatorGrid decides whether the deal is worth paying for.
           </div>
         </div>
       </div>
+
+      <PassportSessionFitCard metrics={metrics} passportStatus={passportStatus} className="mt-3" />
 
       <div className="mt-3 grid grid-cols-3 gap-3">
         <div className="rounded-lg border border-[var(--color-border-subtle)] bg-[#0f1117] p-3">

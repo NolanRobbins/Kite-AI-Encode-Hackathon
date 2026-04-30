@@ -1,53 +1,78 @@
-Kite Passport will help with payment authorization and spending limits, but it will not automatically solve MCP/tool poisoning. Passport can reduce financial blast radius, but descriptor scanning, tool trust, network egress limits, and isolated execution are still our responsibility before live MCP tools.
-For the live demo, I’d keep MCP/tool access disabled and say clearly: “NegotiatorGrid is running live negotiation and guardrails; Passport/MCP payment execution is stubbed until Passport access is ready.”
-Where NegotiatorGrid Sits
-NegotiatorGrid should sit between the agent brain and the payment/tool layer.
+# NegotiatorGrid + Kite Agent Passport Context
+
+Kite Agent Passport has now launched as the payment-control layer for agent commerce. The important framing for NegotiatorGrid is:
+
+> NegotiatorGrid is the negotiation and trust layer for Kite-powered agent procurement.
+
+Passport handles user/agent identity, Sessions, Delegations, payment authorization, x402 payment flow, and the user-visible dashboard audit trail. NegotiatorGrid decides whether an autonomous purchase is a good deal before the agent asks Passport to authorize payment.
+
+## Where NegotiatorGrid Sits
+
+```text
 LLM / Agent Brain
   |
-  | proposes language, strategy summaries
+  | proposes goals, language, strategy summaries
   v
 NegotiatorGrid
   |
-  | validates offers, caps rounds, checks Nash drift,
-  | enforces typed price fields, binds final deal hash
+  | discovers providers, verifies reputation, negotiates terms,
+  | caps rounds, checks Nash drift, binds final deal hash
   v
-Kite Passport / x402 / MCP Tools
+Kite Agent Passport / MCP / x402
   |
-  | approves bounded payment, calls paid service
+  | checks active Session budget, merchant, asset, TTL,
+  | creates Delegation/payment authorization, settles payment
   v
-Seller API / Data Service
-So NegotiatorGrid is not just “context.” It is the policy and control layer. The LLM can narrate or advise, but NegotiatorGrid decides what is valid, what gets paid, and what gets logged.
-MCP Tool Poisoning Mitigation
+Seller API / Data Service / Asset Provider
+```
+
+So NegotiatorGrid is not "just context." It is the procurement policy and control layer. The LLM can narrate or advise, but NegotiatorGrid owns typed fields: price, round, terms hash, seller identity, buyer identity, and settlement amount.
+
+## Product Claim
+
+NegotiatorGrid extends Kite Agent Passport from "authorized agent payments" to "authorized agent procurement." Passport controls whether an agent is allowed to spend. NegotiatorGrid decides whether the deal is good, fair, bounded, and safe enough to pay.
+
+## Demo Stance
+
+For the finished demo:
+
+- Show NegotiatorGrid negotiating a concrete asset or service procurement.
+- Show the accepted price becoming a Passport-compatible payment intent.
+- Show a "Passport Session Fit" check: negotiated price, remaining budget, merchant allowlist, asset/token, and expiration.
+- Use live Passport/MCP/x402 where access is stable.
+- Keep mock/stub fallback paths for recording, and label them as Passport-compatible mocks if live infrastructure is unavailable.
+
+## MCP Tool Poisoning Mitigation
+
+Passport reduces financial blast radius, but it does not automatically solve MCP/tool poisoning. Descriptor scanning, tool trust, network egress limits, and isolated execution are still our responsibility before live MCP tools.
+
 For demo now:
-Do not give agents filesystem access.
-Do not give agents arbitrary MCP tools.
-Do not pass secrets, wallet keys, .env, or private reservation prices into prompts.
-Treat LLM messages as display-only.
-Make typed protocol fields authoritative: price, round, deal_hash, agent_id.
-Keep Kite Passport as stubbed until live access is stable.
-Before live MCP:
-Scan MCP tool descriptors for hidden instructions.
-Pin tool metadata hashes and alert on changes.
-Allow-list MCP server URLs and payment recipients.
-Use ERC-8004 identity/reputation checks before trusting a seller/tool.
-Run external tools in isolated containers with no host env and restricted network.
-Add response-size limits and secret-pattern scanning before tool output enters LLM context.
-Demo LLM Setup
-For the hackathon demo, I’d use:
-Default: policy_only or slm mode for reliability.
-Optional wow mode: API-based LLM narrator for better language.
-Avoid: letting an LLM directly decide exact prices or payment execution.
-Best setup:
-Use API calls to a major provider if you want polished language. Use on-device only if you already have a reliable local model running. On-device is nice for privacy, but often worse for latency, formatting, and setup friction during a live demo.
-Kite AI Business Value
-This is not “just crypto.” The stronger story is:
-Kite enables agentic commerce infrastructure: agents can discover services, negotiate terms, authorize bounded payments, and create auditable records.
-NegotiatorGrid adds the missing market layer:
-Agents should not blindly pay listed prices.
-Sellers should not have to expose one static price.
-Buyers need bounded autonomy and payment controls.
-Markets need reputation, auditability, and settlement guarantees.
-Businesses need explainable agent decisions before trusting autonomous spend.
-So our hackathon value prop is strong if we frame it as:
-> NegotiatorGrid is the negotiation and trust layer for Kite-powered agent commerce.
-Kite Passport handles controlled spending. x402 handles machine payments. MCP handles service discovery/tool access. NegotiatorGrid decides whether the deal is good, fair, bounded, and safe enough to pay.
+
+- Do not give agents filesystem access.
+- Do not give agents arbitrary MCP tools.
+- Do not pass secrets, wallet keys, `.env`, or private reservation prices into prompts.
+- Treat LLM messages as display-only.
+- Make typed protocol fields authoritative: price, round, deal_hash, agent_id.
+
+Before broader live MCP usage:
+
+- Scan MCP tool descriptors for hidden instructions.
+- Pin tool metadata hashes and alert on changes.
+- Allow-list MCP server URLs and payment recipients.
+- Use identity/reputation checks before trusting a seller/tool.
+- Run external tools in isolated containers with no host env and restricted network.
+- Add response-size limits and secret-pattern scanning before tool output enters LLM context.
+
+## Kite AI Business Value
+
+This is not "just crypto." The stronger story is:
+
+Kite enables agentic commerce infrastructure: agents can discover services, authorize bounded payments, and create auditable records. NegotiatorGrid adds the missing market layer:
+
+- Agents should not blindly pay listed prices.
+- Sellers should not have to expose one static price.
+- Buyers need bounded autonomy and payment controls.
+- Markets need reputation, auditability, and settlement guarantees.
+- Businesses need explainable agent decisions before trusting autonomous spend.
+
+Kite Passport handles controlled spending. x402 handles machine payments. MCP handles service discovery/tool access. NegotiatorGrid decides whether the deal is worth paying for.

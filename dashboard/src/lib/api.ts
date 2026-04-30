@@ -1,12 +1,181 @@
 import type { DashboardStats, NegotiationControls } from "@/lib/types";
 
-const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
+export const API_BASE_URL =
+  process.env.NEXT_PUBLIC_API_BASE_URL ??
+  process.env.NEXT_PUBLIC_API_URL ??
+  "http://localhost:8000";
+const API_BASE = API_BASE_URL;
+const DEFAULT_TIMEOUT_MS = 10_000;
 
 const tendencyToStrategy = (tendency: string) => {
   if (tendency === "dominant") return "boulware";
   if (tendency === "cooperative") return "conceder";
   return "linear";
 };
+
+export interface NegotiationRoundRecord {
+  round: number;
+  buyer_offer: number | null;
+  seller_offer: number | null;
+  buyer_nl: string;
+  seller_nl: string;
+  opponent_model: {
+    estimated_reservation?: number;
+    confidence?: number;
+    [key: string]: unknown;
+  };
+  nash_check: string;
+}
+
+export interface NegotiationResultRecord {
+  negotiation_id: string;
+  success: boolean;
+  agreed_price: number;
+  total_rounds: number;
+  deal_hash: string;
+  buyer_utility: number;
+  seller_utility: number;
+  duration_seconds: number;
+  rounds: NegotiationRoundRecord[];
+  reason: string;
+}
+
+export interface SettlementRecord {
+  settled: boolean;
+  x402_tx_hash: string;
+  x402_network: string;
+  attestation_tx: string;
+  attestation_deal_hash: string;
+  kitescan_tx_url: string;
+  kitescan_attestation_url: string;
+  pipeline_error: string;
+  mock_mode: boolean;
+  duration_seconds: number;
+  payment_refused?: boolean;
+  rejection_reason?: string;
+  expected_atomic?: number;
+  requested_atomic?: number;
+}
+
+export interface DealRecord extends SettlementRecord {
+  deal_hash: string;
+  negotiation_id: string;
+  agreed_price: number;
+  total_rounds: number;
+  buyer_agent: string;
+  seller_agent: string;
+  buyer_wallet: string;
+  seller_wallet: string;
+  buyer_utility: number;
+  seller_utility: number;
+  timestamp: number;
+  pipeline_duration_seconds: number;
+  deal_status?: "pending" | "settled" | "rejected";
+  seller_agent_id?: number;
+}
+
+export interface Act3CompareKickoff {
+  scope: string;
+  resource_uri: string;
+  high_rep: { negotiation_id: string; label: string; reputation_stars: number };
+  low_rep: { negotiation_id: string; label: string; reputation_stars: number };
+}
+
+export interface Act3Side {
+  negotiation_id: string;
+  status: string;
+  label: string;
+  reputation_stars: number;
+  agreed_price: number;
+  total_rounds: number;
+  deal_hash: string;
+  rounds: NegotiationRoundRecord[];
+  settlement: Partial<SettlementRecord>;
+  success: boolean;
+}
+
+export interface Act3CompareStatus {
+  high_rep: Act3Side;
+  low_rep: Act3Side;
+  both_complete: boolean;
+  savings_abs: number;
+  savings_pct: number;
+}
+
+export class ApiError extends Error {
+  constructor(
+    message: string,
+    public readonly status: number,
+    public readonly endpoint: string,
+    public readonly cause?: unknown,
+  ) {
+    super(message);
+    this.name = "ApiError";
+  }
+}
+
+async function request<T>(
+  path: string,
+  opts: {
+    method?: "GET" | "POST";
+    body?: unknown;
+    signal?: AbortSignal;
+    timeoutMs?: number;
+  } = {},
+): Promise<T> {
+  const controller = new AbortController();
+  const timeoutId = window.setTimeout(
+    () => controller.abort(),
+    opts.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+  );
+  const onAbort = () => controller.abort();
+  opts.signal?.addEventListener("abort", onAbort, { once: true });
+
+  try {
+    const response = await fetch(`${API_BASE}${path}`, {
+      method: opts.method ?? "GET",
+      headers: opts.body ? { "Content-Type": "application/json" } : undefined,
+      body: opts.body ? JSON.stringify(opts.body) : undefined,
+      signal: controller.signal,
+      cache: opts.method === "POST" ? undefined : "no-store",
+    });
+    if (!response.ok) {
+      throw new ApiError(`${path} failed (${response.status})`, response.status, path);
+    }
+    return (await response.json()) as T;
+  } catch (err) {
+    if (err instanceof ApiError) throw err;
+    throw new ApiError(
+      `${path} network error: ${(err as Error)?.message ?? String(err)}`,
+      0,
+      path,
+      err,
+    );
+  } finally {
+    window.clearTimeout(timeoutId);
+    opts.signal?.removeEventListener("abort", onAbort);
+  }
+}
+
+export const api = {
+  listDeals: (signal?: AbortSignal) =>
+    request<DealRecord[]>("/api/deals", { signal }),
+  startAct3Compare: (body: Record<string, unknown> = {}, signal?: AbortSignal) =>
+    request<Act3CompareKickoff>("/api/act3/compare", {
+      method: "POST",
+      body,
+      signal,
+    }),
+  getAct3CompareStatus: (
+    highId: string,
+    lowId: string,
+    signal?: AbortSignal,
+  ) =>
+    request<Act3CompareStatus>(
+      `/api/act3/compare/${encodeURIComponent(highId)}/${encodeURIComponent(lowId)}`,
+      { signal },
+    ),
+} as const;
 
 export async function startNegotiation(controls: NegotiationControls) {
   const response = await fetch(`${API_BASE}/api/negotiate`, {

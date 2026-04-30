@@ -1,36 +1,44 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# NegotiatorGrid Dashboard
 
-## Getting Started
+Next.js static-export dashboard for the NegotiatorGrid demo.
 
-First, run the development server:
+The dashboard should present the actual procurement workflow on the first screen:
 
-```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+```text
+discover provider -> negotiate terms -> Passport Session Fit -> x402 settlement -> attestation
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+## Demo Narrative
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+NegotiatorGrid extends Kite Agent Passport from **authorized payments** to **authorized procurement**. Passport controls whether an agent is allowed to spend. NegotiatorGrid decides whether the negotiated deal is good, fair, bounded, and safe enough to pay.
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+Key UI surfaces:
 
-## Learn More
+- Price convergence chart with buyer/seller offers and Nash band.
+- Negotiation timeline with typed deal fields treated as authoritative.
+- Agent identity/reputation cards.
+- **Passport Session Fit** panel showing negotiated price, remaining Session budget, per-payment cap, merchant/payee, asset/token, TTL, and pass/fail status.
+- Settlement and attestation feed with clear live/mock labels.
 
-To learn more about Next.js, take a look at the following resources:
+## Commands
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+```bash
+npm install
+npm run dev
+npm run build
+```
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+The app is configured for static export. Build output goes to `out/`.
 
-## Deploy on Vercel
+## Environment
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+Copy `.env.local.example` to `.env.local` when running locally.
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+Expected public values:
+
+- `NEXT_PUBLIC_API_BASE_URL` - backend REST API base URL
+- `NEXT_PUBLIC_WS_URL` - backend WebSocket URL
+- `NEXT_PUBLIC_CHAIN_ID` - Kite network chain ID used by the demo
+- `NEXT_PUBLIC_EXPLORER_URL` - KiteScan/explorer URL for attestation links
+
+Label mock paths honestly in the UI: `Passport MCP live`, `Passport-compatible mock`, `x402 live`, or `mock facilitator`.

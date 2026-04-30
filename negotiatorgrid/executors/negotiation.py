@@ -297,6 +297,10 @@ def _social_risk_label(deviation_pct: float, objective_mode: str) -> str:
 
 def _sandbox_posture(model_mode: str) -> dict[str, Any]:
     return {
+        "buyer_agent_isolated": True,
+        "seller_agent_isolated": True,
+        "shared_private_state": False,
+        "transport": "typed_offer_bus",
         "llm_tool_access": "none",
         "filesystem_access": "none",
         "network_access": "model_api_only" if model_mode in {"llm", "reasoning_llm"} else "none",
@@ -305,8 +309,9 @@ def _sandbox_posture(model_mode: str) -> dict[str, Any]:
         "free_text_can_execute_actions": False,
         "mcp_tools_enabled": False,
         "note": (
-            "Current demo agents do not receive filesystem, wallet, or MCP tools. "
-            "Only typed negotiation state is sent to the language layer, and numeric protocol fields win over prose."
+            "Buyer and seller run as separate negotiation policies with separate reservation bounds. "
+            "They do not receive filesystem, wallet, or MCP tools. Only typed negotiation state is sent "
+            "to the language layer, and numeric protocol fields win over prose."
         ),
     }
 

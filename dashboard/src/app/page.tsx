@@ -2,7 +2,19 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { motion } from "framer-motion";
-import { Activity, Handshake, DollarSign, BarChart3, Zap } from "lucide-react";
+import {
+  Activity,
+  ArrowLeftRight,
+  BarChart3,
+  CreditCard,
+  DollarSign,
+  FileCheck2,
+  Handshake,
+  Radar,
+  Search,
+  ShieldCheck,
+  Zap,
+} from "lucide-react";
 import { StatCard } from "@/components/stat-card";
 import { PriceConvergenceChart } from "@/components/price-convergence";
 import { NegotiationTimeline } from "@/components/negotiation-timeline";
@@ -12,6 +24,8 @@ import { RecentActivity } from "@/components/recent-activity";
 import { DecisionTracePanel } from "@/components/decision-trace-panel";
 import { DealMetricsPanel } from "@/components/deal-metrics-panel";
 import { EdgeCasePanel } from "@/components/edge-case-panel";
+import { PassportSessionFitCard } from "@/components/passport-session-fit-card";
+import { AgentIsolationPanel } from "@/components/agent-isolation-panel";
 import { fetchStats, startNegotiation as startNegotiationRequest } from "@/lib/api";
 import { useNegotiationStream } from "@/lib/use-negotiation-stream";
 import type { BargainingTendency, ModelMode, NegotiationControls, ObjectiveMode } from "@/lib/types";
@@ -40,6 +54,14 @@ const modelOptions: Array<{ value: ModelMode; label: string }> = [
   { value: "slm", label: "SLM Narrator" },
   { value: "llm", label: "LLM Narrator" },
   { value: "reasoning_llm", label: "Reasoning Advisor" },
+];
+
+const procurementSteps = [
+  { label: "Discover", icon: Search },
+  { label: "Negotiate", icon: ArrowLeftRight },
+  { label: "Session Fit", icon: ShieldCheck },
+  { label: "Settle", icon: CreditCard },
+  { label: "Attest", icon: FileCheck2 },
 ];
 
 function SelectPill<T extends string>({
@@ -127,6 +149,7 @@ export default function DashboardPage() {
   const nashPrice = result?.metrics?.nash_price ?? latestRound?.nash_price ?? 0.1034;
   const dealReached = Boolean(result?.success) || (!hasLiveRounds && !isNegotiating);
   const visibleRounds = chartRounds.length;
+  const activeStep = dealReached ? 4 : hasLiveRounds ? 1 : 0;
 
   const handleStartNegotiation = useCallback(() => {
     if (isNegotiating) return;
@@ -180,16 +203,20 @@ export default function DashboardPage() {
       {/* Header */}
       <div className="flex items-start justify-between gap-4">
         <div>
-          <h1 className="text-xl font-semibold tracking-tight">
-            Live Negotiation Arena
+          <div className="mb-1 flex items-center gap-2 text-[10px] font-mono uppercase tracking-[0.18em] text-[var(--color-cyan)]">
+            <Radar size={13} />
+            Passport-powered procurement
+          </div>
+          <h1 className="text-2xl font-semibold tracking-tight">
+            Watch the deal form
           </h1>
-          <p className="text-xs text-[var(--color-text-faint)] mt-0.5">
-            Watch two agents barter while NegotiatorGrid exposes strategy, Nash drift, and deal quality.
+          <p className="mt-1 max-w-2xl text-sm text-[var(--color-text-muted)]">
+            Independent buyer and seller agents barter through typed offers. NegotiatorGrid validates the deal before Kite Passport authorizes spend.
           </p>
           <div className="mt-2 flex items-center gap-2 text-[10px] text-[var(--color-text-faint)]">
             <span className={`h-1.5 w-1.5 rounded-full ${connected ? "bg-[var(--color-deal)]" : "bg-[var(--color-warning)]"}`} />
             {connected ? "Backend stream connected" : "Backend stream offline"}
-            <span>· Passport authorization stubbed pending Kite release</span>
+            <span>· Passport Session Fit uses live MCP when configured, otherwise a labeled mock</span>
           </div>
         </div>
 
@@ -220,6 +247,57 @@ export default function DashboardPage() {
           {startError || error}
         </div>
       )}
+
+      <div className="card-base p-3">
+        <div className="grid grid-cols-5 gap-2">
+          {procurementSteps.map((step, index) => {
+            const Icon = step.icon;
+            const isDone = index <= activeStep;
+            const isCurrent = index === activeStep;
+            return (
+              <div
+                key={step.label}
+                className={`flex items-center gap-2 rounded-lg border px-3 py-2 ${
+                  isCurrent
+                    ? "border-[var(--color-cyan-dim)] bg-[var(--color-cyan-glow)] text-[var(--color-cyan)]"
+                    : isDone
+                    ? "border-[var(--color-deal-dim)] bg-[var(--color-deal-bg)] text-[var(--color-deal)]"
+                    : "border-[var(--color-border-subtle)] bg-[#0b0d12] text-[var(--color-text-faint)]"
+                }`}
+              >
+                <Icon size={14} />
+                <span className="text-xs font-semibold">{step.label}</span>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* Hero barter view */}
+      <div className="grid grid-cols-[minmax(0,1fr)_380px] gap-4">
+        <PriceConvergenceChart
+          rounds={chartRounds}
+          visibleRounds={visibleRounds}
+          dealReached={dealReached}
+          finalPrice={finalPrice}
+          nashPrice={nashPrice}
+          className="min-h-[460px]"
+        />
+        <div className="space-y-4">
+          <NegotiationTimeline
+            rounds={chartRounds}
+            visibleRounds={visibleRounds}
+            dealReached={dealReached}
+            finalPrice={finalPrice}
+          />
+          <PassportSessionFitCard
+            metrics={result?.metrics}
+            passportStatus={result?.passport_status ?? "stubbed"}
+            compact
+          />
+          <AgentIsolationPanel />
+        </div>
+      </div>
 
       {/* Demo controls */}
       <div className="card-base p-4">
@@ -313,23 +391,6 @@ export default function DashboardPage() {
           icon={BarChart3}
           accent="var(--color-seller)"
           subtext="per deal"
-        />
-      </div>
-
-      {/* Hero chart + Timeline */}
-      <div className="grid grid-cols-[1fr_380px] gap-4">
-        <PriceConvergenceChart
-          rounds={chartRounds}
-          visibleRounds={visibleRounds}
-          dealReached={dealReached}
-          finalPrice={finalPrice}
-          nashPrice={nashPrice}
-        />
-        <NegotiationTimeline
-          rounds={chartRounds}
-          visibleRounds={visibleRounds}
-          dealReached={dealReached}
-          finalPrice={finalPrice}
         />
       </div>
 
