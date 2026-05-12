@@ -6,6 +6,8 @@ Kite Agent Passport has now launched as the payment-control layer for agent comm
 
 Passport handles user/agent identity, Sessions, Delegations, payment authorization, x402 payment flow, and the user-visible dashboard audit trail. NegotiatorGrid decides whether an autonomous purchase is a good deal before the agent asks Passport to authorize payment.
 
+For the **embedding model** (NegotiatorGrid as a dev-time Python module on procurement agents, asymmetric vs bilateral Nash-oriented play), see the repo root **`CONTEXT.md`**.
+
 ## Where NegotiatorGrid Sits
 
 ```text

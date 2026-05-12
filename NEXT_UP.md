@@ -1,6 +1,6 @@
 # NEXT_UP - operator checklist
 
-**Last updated:** April 30, 2026
+**Last updated:** May 11, 2026
 
 Practical checklist for refining the finished NegotiatorGrid demo now that Kite Agent Passport has launched. Order is roughly by impact.
 
@@ -17,6 +17,7 @@ Practical checklist for refining the finished NegotiatorGrid demo now that Kite 
 - Add or emphasize a **Passport Session Fit** panel: negotiated price, remaining Session budget, per-payment cap, merchant/payee, asset/token, TTL, and pass/fail status.
 - In the settlement/attestation panels, label live vs mock clearly: `Passport MCP live`, `Passport-compatible mock`, `x402 live`, or `mock facilitator`.
 - Keep the first screen focused on the actual procurement workflow, not a landing page.
+- **Deferred (optional):** add a small **Act 3 compare** panel when you want self-serve testing without leaving the UI. The backend already exposes `POST /api/act3/compare` and `GET /api/act3/compare/{high_id}/{low_id}` (see `negotiatorgrid/api/act3_compare.py`). Judges do not require this in the dashboard if you hit the same flow from curl, Postman, or your demo script; treat it as a later polish item.
 
 ## 3. Environment & secrets
 
@@ -38,7 +39,8 @@ Practical checklist for refining the finished NegotiatorGrid demo now that Kite 
 ## 6. One live smoke pass
 
 - Open deployed dashboard -> **Start Negotiation** -> confirm rounds + Passport Session Fit + settlement/attestation.
-- Hit **Act 3** and **Act 5** flows if those are in your script.
+- **Act 3 compare (API):** `POST /api/act3/compare` with body `{}` → take `high_rep.negotiation_id` and `low_rep.negotiation_id` → poll `GET /api/act3/compare/{high_id}/{low_id}` until `both_complete` is true. No dashboard page required for this path.
+- Hit **Act 5** flows if those are in your script.
 - Confirm **WebSocket** works through your real URL, not `localhost`.
 
 ## 7. Demo artifacts

@@ -8,15 +8,16 @@ import json
 import logging
 import time
 import uuid
-from enum import Enum
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import Any, Callable, Optional
 
 from negotiatorgrid.core.negotiation import NegotiationSession
-from negotiatorgrid.core.opponent_model import OpponentModeler
 from negotiatorgrid.core.nash_guardrail import NashGuardrail
+from negotiatorgrid.core.opponent_model import OpponentModeler
 from negotiatorgrid.core.types import NegotiationConfig as CoreNegConfig
 from negotiatorgrid.core.types import NegotiationOffer as CoreOffer
+from negotiatorgrid.core.types import NegotiationResult as CoreSessionResult
 from negotiatorgrid.llm.offer_generator import OfferGenerator
 
 logger = logging.getLogger(__name__)
@@ -25,6 +26,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # State Machine
 # ---------------------------------------------------------------------------
+
 
 class NegotiationState(str, Enum):
     """State machine for a bilateral negotiation session."""
@@ -40,10 +42,14 @@ class NegotiationState(str, Enum):
 
 # ---------------------------------------------------------------------------
 # Wire-format data structures (A2A message metadata payloads)
+#
+# Names are ``Wire*`` to avoid colliding with :class:`negotiatorgrid.core.types.NegotiationOffer`
+# / ``NegotiationResult`` (Pydantic transcript output from NegMAS ``NegotiationSession``).
 # ---------------------------------------------------------------------------
 
+
 @dataclass
-class NegotiationOffer:
+class WireNegotiationOffer:
     """A single offer / counter-offer in the negotiation."""
 
     round: int
@@ -73,12 +79,12 @@ class NegotiationOffer:
 
 
 @dataclass
-class NegotiationRound:
+class WireNegotiationRound:
     """One complete round: buyer offer + seller counter."""
 
     round_number: int
-    buyer_offer: Optional[NegotiationOffer] = None
-    seller_offer: Optional[NegotiationOffer] = None
+    buyer_offer: Optional[WireNegotiationOffer] = None
+    seller_offer: Optional[WireNegotiationOffer] = None
     opponent_model: dict[str, Any] = field(default_factory=dict)
     nash_check: str = "N/A"
     nash_price: float = 0.0
@@ -105,8 +111,8 @@ class NegotiationRound:
 
 
 @dataclass
-class NegotiationResult:
-    """Final outcome of a negotiation session."""
+class WireNegotiationResult:
+    """Final outcome of a negotiation session (executor / API wire shape)."""
 
     negotiation_id: str = ""
     success: bool = False
@@ -116,7 +122,7 @@ class NegotiationResult:
     buyer_utility: float = 0.0
     seller_utility: float = 0.0
     duration_seconds: float = 0.0
-    rounds: list[NegotiationRound] = field(default_factory=list)
+    rounds: list[WireNegotiationRound] = field(default_factory=list)
     metrics: dict[str, Any] = field(default_factory=dict)
     objective_mode: str = "fairness_guardrail"
     passport_status: str = "stubbed"
@@ -143,6 +149,7 @@ class NegotiationResult:
 # ---------------------------------------------------------------------------
 # Agent config for a negotiation participant
 # ---------------------------------------------------------------------------
+
 
 @dataclass
 class AgentConfig:
@@ -226,12 +233,18 @@ def _normalise_objective_mode(value: str) -> str:
         "nash": "pure_nash",
         "pure_nash_benchmark": "pure_nash",
     }
-    return aliases.get(mode, mode if mode in {
-        "fairness_guardrail",
-        "buyer_advantage",
-        "seller_advantage",
-        "pure_nash",
-    } else "fairness_guardrail")
+    return aliases.get(
+        mode,
+        mode
+        if mode
+        in {
+            "fairness_guardrail",
+            "buyer_advantage",
+            "seller_advantage",
+            "pure_nash",
+        }
+        else "fairness_guardrail",
+    )
 
 
 def _normalise_model_mode(value: str) -> str:
@@ -245,12 +258,10 @@ def _normalise_model_mode(value: str) -> str:
         "large_language_model": "llm",
         "reasoning": "reasoning_llm",
     }
-    return aliases.get(mode, mode if mode in {
-        "policy_only",
-        "slm",
-        "llm",
-        "reasoning_llm",
-    } else "policy_only")
+    return aliases.get(
+        mode,
+        mode if mode in {"policy_only", "slm", "llm", "reasoning_llm"} else "policy_only",
+    )
 
 
 def _agent_exponent(config: AgentConfig, objective_mode: str) -> float:
@@ -381,8 +392,42 @@ def _reasoning_summary(
 
 
 # ---------------------------------------------------------------------------
+# NegotiationExecutor internals (session assembly + transcript enrichment)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class _TranscriptEnrichmentContext:
+    """Inputs for turning a NegMAS transcript into wire rounds."""
+
+    negotiation_id: str
+    session: dict[str, Any]
+    core_result: CoreSessionResult
+    display_price: Callable[[float], float]
+    buyer_config: AgentConfig
+    seller_config: AgentConfig
+    neg_config: NegotiationParams
+    objective_mode: str
+    buyer_om: Optional[OpponentModeler]
+    seller_om: Optional[OpponentModeler]
+    offer_gen: OfferGenerator
+    guardrail: NashGuardrail
+    core_config: CoreNegConfig
+
+
+@dataclass
+class _TranscriptEnrichmentOutcome:
+    """Outputs from async transcript enrichment."""
+
+    rounds: list[WireNegotiationRound]
+    last_nash_result: Any
+    offer_gen: OfferGenerator
+
+
+# ---------------------------------------------------------------------------
 # NegotiationExecutor — the main class
 # ---------------------------------------------------------------------------
+
 
 class NegotiationExecutor:
     """Manages an A2A bilateral negotiation session.
@@ -403,48 +448,25 @@ class NegotiationExecutor:
         self._on_round = on_round
         self._on_result = on_result
 
-    # -- Public API ---------------------------------------------------------
+    @staticmethod
+    def _resolve_negotiation_id(negotiation_id: str | None) -> str:
+        external = (negotiation_id or "").strip()
+        if external:
+            return external
+        return f"neg-{uuid.uuid4().hex[:8]}"
 
-    async def start_negotiation(
-        self,
+    @staticmethod
+    def _build_scaled_core_config(
         buyer_config: AgentConfig,
         seller_config: AgentConfig,
         neg_config: NegotiationParams,
-    ) -> NegotiationResult:
-        """Run a full bilateral negotiation and return the result."""
-        negotiation_id = f"neg-{uuid.uuid4().hex[:8]}"
-        self.state = NegotiationState.DISCOVERING
-        start_time = time.time()
-        objective_mode = _normalise_objective_mode(neg_config.objective_mode)
-        model_mode = _normalise_model_mode(neg_config.model_mode)
-
-        # Store session metadata
-        session: dict[str, Any] = {
-            "id": negotiation_id,
-            "buyer": buyer_config,
-            "seller": seller_config,
-            "params": neg_config,
-            "rounds": [],
-            "start_time": start_time,
-        }
-        self._negotiations[negotiation_id] = session
-
-        # Transition to negotiation
-        self.state = NegotiationState.NEGOTIATING
-
-        # Map UI-facing controls to aspiration exponents.
-        buyer_exp = _agent_exponent(buyer_config, objective_mode)
-        seller_exp = _agent_exponent(seller_config, objective_mode)
-
-        # Build core NegotiationConfig with price range encompassing both
-        # agents' reservation prices plus margin. NegMAS uses discrete integer
-        # issue indices, so sub-dollar demo prices are scaled internally.
+    ) -> tuple[CoreNegConfig, Callable[[float], float]]:
+        """Map UI prices into NegMAS integer issue space and return ``display_price`` scaler."""
         price_min = min(buyer_config.initial_price, seller_config.reservation_price) * 0.8
         price_max = max(seller_config.initial_price, buyer_config.reservation_price) * 1.2
         price_scale = 10_000.0 if price_max <= 1.0 else 1.0
         core_price_min = price_min * price_scale
         core_price_max = price_max * price_scale
-        # Ensure a sane range (at least 1 unit wide for NegMAS discrete issues)
         if core_price_max - core_price_min < 1.0:
             core_price_min = min(
                 buyer_config.initial_price,
@@ -466,20 +488,42 @@ class NegotiationExecutor:
             buyer_reservation=buyer_config.reservation_price * price_scale,
             seller_reservation=seller_config.reservation_price * price_scale,
         )
+        return core_config, display_price
 
-        # Create opponent modelers only for agents running with NegotiatorGrid.
-        buyer_om = OpponentModeler(
-            is_opponent_seller=True,
-            price_min=core_config.price_min,
-            price_max=core_config.price_max,
-        ) if buyer_config.grid_enabled else None
-        seller_om = OpponentModeler(
-            is_opponent_seller=False,
-            price_min=core_config.price_min,
-            price_max=core_config.price_max,
-        ) if seller_config.grid_enabled else None
+    @staticmethod
+    def _make_grid_modelers(
+        buyer_config: AgentConfig,
+        seller_config: AgentConfig,
+        core_config: CoreNegConfig,
+    ) -> tuple[Optional[OpponentModeler], Optional[OpponentModeler]]:
+        buyer_om = (
+            OpponentModeler(
+                is_opponent_seller=True,
+                price_min=core_config.price_min,
+                price_max=core_config.price_max,
+            )
+            if buyer_config.grid_enabled
+            else None
+        )
+        seller_om = (
+            OpponentModeler(
+                is_opponent_seller=False,
+                price_min=core_config.price_min,
+                price_max=core_config.price_max,
+            )
+            if seller_config.grid_enabled
+            else None
+        )
+        return buyer_om, seller_om
 
-        # Create and run the REAL NegMAS-backed negotiation session
+    @staticmethod
+    def _run_negmas_core(
+        core_config: CoreNegConfig,
+        buyer_exp: float,
+        seller_exp: float,
+        buyer_om: Optional[OpponentModeler],
+        seller_om: Optional[OpponentModeler],
+    ) -> CoreSessionResult:
         neg_session = NegotiationSession(
             config=core_config,
             buyer_opponent_modeler=buyer_om,
@@ -487,89 +531,90 @@ class NegotiationExecutor:
             buyer_exponent=buyer_exp,
             seller_exponent=seller_exp,
         )
-        core_result = neg_session.run()
+        return neg_session.run()
 
-        # Post-process the transcript: build round-by-round data with
-        # opponent model updates, Nash checks, and NL messages
-        guardrail = NashGuardrail()
-        offer_gen = OfferGenerator(
-            model_mode=model_mode,
-            provider=neg_config.model_provider,
-            model=neg_config.model_name,
-            latency_budget_ms=neg_config.model_latency_budget_ms,
-        )
-
-        # Group transcript offers into rounds (buyer + seller per round)
+    @staticmethod
+    def _group_core_offers_by_round(
+        transcript: list[CoreOffer],
+    ) -> tuple[dict[int, CoreOffer], dict[int, CoreOffer]]:
         buyer_offers_by_round: dict[int, CoreOffer] = {}
         seller_offers_by_round: dict[int, CoreOffer] = {}
-        for offer in core_result.transcript:
+        for offer in transcript:
             if offer.agent_id == "buyer":
                 buyer_offers_by_round[offer.round_number] = offer
             elif offer.agent_id == "seller":
                 seller_offers_by_round[offer.round_number] = offer
+        return buyer_offers_by_round, seller_offers_by_round
 
-        all_round_nums = sorted(set(buyer_offers_by_round.keys()) | set(seller_offers_by_round.keys()))
+    async def _enrich_and_broadcast_rounds(
+        self,
+        ctx: _TranscriptEnrichmentContext,
+    ) -> _TranscriptEnrichmentOutcome:
+        buyer_offers_by_round, seller_offers_by_round = self._group_core_offers_by_round(
+            ctx.core_result.transcript
+        )
+        all_round_nums = sorted(
+            set(buyer_offers_by_round.keys()) | set(seller_offers_by_round.keys())
+        )
 
-        rounds_data: list[NegotiationRound] = []
+        rounds_data: list[WireNegotiationRound] = []
         previous_buyer_price: float | None = None
         previous_seller_price: float | None = None
         last_nash_result = None
-        for rnd in all_round_nums:
-            r_num = rnd + 1  # 0-indexed NegMAS step → 1-indexed round
 
+        for rnd in all_round_nums:
+            r_num = rnd + 1
             b_core = buyer_offers_by_round.get(rnd)
             s_core = seller_offers_by_round.get(rnd)
-            buyer_display_price = display_price(b_core.price) if b_core else None
-            seller_display_price = display_price(s_core.price) if s_core else None
+            buyer_display_price = ctx.display_price(b_core.price) if b_core else None
+            seller_display_price = ctx.display_price(s_core.price) if s_core else None
 
-            # Generate NL messages via OfferGenerator
             buyer_nl = ""
             seller_nl = ""
             if buyer_display_price is not None:
-                buyer_nl = offer_gen.generate_buyer_offer(round_num=r_num, price=buyer_display_price)
+                buyer_nl = ctx.offer_gen.generate_buyer_offer(
+                    round_num=r_num, price=buyer_display_price
+                )
             if seller_display_price is not None:
-                seller_nl = offer_gen.generate_seller_counter(
+                seller_nl = ctx.offer_gen.generate_seller_counter(
                     round_num=r_num,
                     price=seller_display_price,
                 )
 
-            # Compute aspiration and stance from time
-            t = r_num / max(neg_config.max_rounds, 1)
+            t = r_num / max(ctx.neg_config.max_rounds, 1)
 
-            # Get opponent model snapshot from the buyer's perspective
-            opp_model_data = buyer_om.get_model() if buyer_om else None
+            opp_model_data = ctx.buyer_om.get_model() if ctx.buyer_om else None
             opp_model_dict = {
                 "estimated_reservation": round(
-                    display_price(opp_model_data.estimated_reservation_price)
+                    ctx.display_price(opp_model_data.estimated_reservation_price)
                     if opp_model_data
                     else 0.0,
                     6,
                 ),
                 "confidence": round(opp_model_data.confidence if opp_model_data else 0.0, 2),
-                "buyer_grid_enabled": buyer_config.grid_enabled,
-                "seller_grid_enabled": seller_config.grid_enabled,
+                "buyer_grid_enabled": ctx.buyer_config.grid_enabled,
+                "seller_grid_enabled": ctx.seller_config.grid_enabled,
             }
 
-            # Nash guardrail check for this round
             nash_status = "N/A"
             nash_price = 0.0
             nash_deviation_pct = 0.0
             if b_core and s_core:
                 buyer_price = buyer_display_price or 0.0
                 seller_price = seller_display_price or 0.0
-                # Simple ZOPA check using the guardrail's logic
+
                 def buyer_ufun(p: float) -> float:
-                    return max(0.0, buyer_config.reservation_price - p)
+                    return max(0.0, ctx.buyer_config.reservation_price - p)
 
                 def seller_ufun(p: float) -> float:
-                    return max(0.0, p - seller_config.reservation_price)
+                    return max(0.0, p - ctx.seller_config.reservation_price)
 
-                nash_result = guardrail.check_deal(
+                nash_result = ctx.guardrail.check_deal(
                     agreed_price=(buyer_price + seller_price) / 2.0,
                     buyer_ufun=buyer_ufun,
                     seller_ufun=seller_ufun,
-                    price_min=display_price(core_config.price_min),
-                    price_max=display_price(core_config.price_max),
+                    price_min=ctx.display_price(ctx.core_config.price_min),
+                    price_max=ctx.display_price(ctx.core_config.price_max),
                     grid_size=11,
                 )
                 last_nash_result = nash_result
@@ -580,13 +625,13 @@ class NegotiationExecutor:
             buyer_offer = None
             if b_core and buyer_display_price is not None:
                 buyer_price = buyer_display_price
-                buyer_tendency = _tendency_label(buyer_config)
-                buyer_offer = NegotiationOffer(
+                buyer_tendency = _tendency_label(ctx.buyer_config)
+                buyer_offer = WireNegotiationOffer(
                     round=r_num,
                     price=buyer_price,
-                    scope=neg_config.scope,
+                    scope=ctx.neg_config.scope,
                     nl_message=buyer_nl,
-                    agent_id=buyer_config.agent_id or "buyer",
+                    agent_id=ctx.buyer_config.agent_id or "buyer",
                     timestamp=b_core.timestamp,
                     utility=round(1.0 - t * 0.3, 3),
                     aspiration=round(1.0 - t * 0.5, 3),
@@ -595,8 +640,8 @@ class NegotiationExecutor:
                         role="buyer",
                         price=buyer_price,
                         previous_price=previous_buyer_price,
-                        objective_mode=objective_mode,
-                        grid_enabled=buyer_config.grid_enabled,
+                        objective_mode=ctx.objective_mode,
+                        grid_enabled=ctx.buyer_config.grid_enabled,
                         tendency=buyer_tendency,
                         opponent_model=opp_model_dict,
                         nash_status=nash_status,
@@ -608,23 +653,25 @@ class NegotiationExecutor:
             seller_offer = None
             if s_core and seller_display_price is not None:
                 seller_price = seller_display_price
-                seller_tendency = _tendency_label(seller_config)
-                seller_model_data = seller_om.get_model() if seller_om else None
+                seller_tendency = _tendency_label(ctx.seller_config)
+                seller_model_data = ctx.seller_om.get_model() if ctx.seller_om else None
                 seller_opp_model = {
                     "estimated_reservation": round(
-                        display_price(seller_model_data.estimated_reservation_price)
+                        ctx.display_price(seller_model_data.estimated_reservation_price)
                         if seller_model_data
                         else 0.0,
                         6,
                     ),
-                    "confidence": round(seller_model_data.confidence if seller_model_data else 0.0, 2),
+                    "confidence": round(
+                        seller_model_data.confidence if seller_model_data else 0.0, 2
+                    ),
                 }
-                seller_offer = NegotiationOffer(
+                seller_offer = WireNegotiationOffer(
                     round=r_num,
                     price=seller_price,
-                    scope=neg_config.scope,
+                    scope=ctx.neg_config.scope,
                     nl_message=seller_nl,
-                    agent_id=seller_config.agent_id or "seller",
+                    agent_id=ctx.seller_config.agent_id or "seller",
                     timestamp=s_core.timestamp,
                     utility=round(1.0 - t * 0.25, 3),
                     aspiration=round(1.0 - t * 0.45, 3),
@@ -633,8 +680,8 @@ class NegotiationExecutor:
                         role="seller",
                         price=seller_price,
                         previous_price=previous_seller_price,
-                        objective_mode=objective_mode,
-                        grid_enabled=seller_config.grid_enabled,
+                        objective_mode=ctx.objective_mode,
+                        grid_enabled=ctx.seller_config.grid_enabled,
                         tendency=seller_tendency,
                         opponent_model=seller_opp_model,
                         nash_status=nash_status,
@@ -643,7 +690,7 @@ class NegotiationExecutor:
                 )
                 previous_seller_price = seller_price
 
-            neg_round = NegotiationRound(
+            neg_round = WireNegotiationRound(
                 round_number=r_num,
                 buyer_offer=buyer_offer,
                 seller_offer=seller_offer,
@@ -651,28 +698,118 @@ class NegotiationExecutor:
                 nash_check=nash_status,
                 nash_price=nash_price,
                 nash_deviation_pct=nash_deviation_pct,
-                runtime=offer_gen.runtime_metrics(),
+                runtime=ctx.offer_gen.runtime_metrics(),
             )
             rounds_data.append(neg_round)
-            session["rounds"].append(neg_round)
+            ctx.session["rounds"].append(neg_round)
 
-            # Broadcast round if callback registered
             if self._on_round:
                 try:
-                    await self._on_round(negotiation_id, neg_round)
+                    await self._on_round(ctx.negotiation_id, neg_round)
                 except Exception:
                     logger.exception("Error in on_round callback")
 
-            # Small delay for visual streaming effect
             await asyncio.sleep(0.1)
+
+        return _TranscriptEnrichmentOutcome(
+            rounds=rounds_data,
+            last_nash_result=last_nash_result,
+            offer_gen=ctx.offer_gen,
+        )
+
+    async def _emit_final_result(self, result: WireNegotiationResult, success: bool) -> None:
+        self.state = NegotiationState.COMPLETED if success else NegotiationState.FAILED
+        if self._on_result:
+            try:
+                await self._on_result(result)
+            except Exception:
+                logger.exception("Error in on_result callback")
+
+    # -- Public API ---------------------------------------------------------
+
+    async def start_negotiation(
+        self,
+        buyer_config: AgentConfig,
+        seller_config: AgentConfig,
+        neg_config: NegotiationParams,
+        *,
+        negotiation_id: str | None = None,
+    ) -> WireNegotiationResult:
+        """Run a full bilateral negotiation and return the result.
+
+        Args:
+            negotiation_id: Correlation id from the host (e.g. REST path). When
+                omitted or blank, a new ``neg-…`` id is minted for standalone runs.
+        """
+        negotiation_id = self._resolve_negotiation_id(negotiation_id)
+        self.state = NegotiationState.DISCOVERING
+        start_time = time.time()
+        objective_mode = _normalise_objective_mode(neg_config.objective_mode)
+        model_mode = _normalise_model_mode(neg_config.model_mode)
+
+        session: dict[str, Any] = {
+            "id": negotiation_id,
+            "buyer": buyer_config,
+            "seller": seller_config,
+            "params": neg_config,
+            "rounds": [],
+            "start_time": start_time,
+        }
+        self._negotiations[negotiation_id] = session
+        self.state = NegotiationState.NEGOTIATING
+
+        buyer_exp = _agent_exponent(buyer_config, objective_mode)
+        seller_exp = _agent_exponent(seller_config, objective_mode)
+
+        core_config, display_price = self._build_scaled_core_config(
+            buyer_config, seller_config, neg_config
+        )
+        buyer_om, seller_om = self._make_grid_modelers(
+            buyer_config, seller_config, core_config
+        )
+        core_result = self._run_negmas_core(
+            core_config, buyer_exp, seller_exp, buyer_om, seller_om
+        )
+
+        guardrail = NashGuardrail()
+        offer_gen = OfferGenerator(
+            model_mode=model_mode,
+            provider=neg_config.model_provider,
+            model=neg_config.model_name,
+            latency_budget_ms=neg_config.model_latency_budget_ms,
+        )
+
+        ctx = _TranscriptEnrichmentContext(
+            negotiation_id=negotiation_id,
+            session=session,
+            core_result=core_result,
+            display_price=display_price,
+            buyer_config=buyer_config,
+            seller_config=seller_config,
+            neg_config=neg_config,
+            objective_mode=objective_mode,
+            buyer_om=buyer_om,
+            seller_om=seller_om,
+            offer_gen=offer_gen,
+            guardrail=guardrail,
+            core_config=core_config,
+        )
+        enriched = await self._enrich_and_broadcast_rounds(ctx)
+        rounds_data = enriched.rounds
+        last_nash_result = enriched.last_nash_result
+        offer_gen = enriched.offer_gen
 
         duration = time.time() - start_time
         success = core_result.agreed_price is not None
-        agreed_price = display_price(core_result.agreed_price) if core_result.agreed_price else 0.0
+        agreed_price = (
+            display_price(core_result.agreed_price) if core_result.agreed_price else 0.0
+        )
+        deal_hash = (
+            compute_deal_hash(negotiation_id, agreed_price, len(rounds_data))
+            if success
+            else ""
+        )
 
-        deal_hash = compute_deal_hash(negotiation_id, agreed_price, len(rounds_data)) if success else ""
-
-        # Compute utilities relative to initial/reservation prices
         buyer_util = 0.0
         seller_util = 0.0
         if success:
@@ -714,7 +851,7 @@ class NegotiationExecutor:
             ),
         }
 
-        result = NegotiationResult(
+        result = WireNegotiationResult(
             negotiation_id=negotiation_id,
             success=success,
             agreed_price=agreed_price,
@@ -730,22 +867,15 @@ class NegotiationExecutor:
             reason=reason,
         )
 
-        self.state = NegotiationState.COMPLETED if success else NegotiationState.FAILED
-
-        if self._on_result:
-            try:
-                await self._on_result(result)
-            except Exception:
-                logger.exception("Error in on_result callback")
-
+        await self._emit_final_result(result, success)
         return result
 
     # -- A2A message handling ------------------------------------------------
 
-    def handle_offer(self, message: dict[str, Any]) -> NegotiationOffer:
+    def handle_offer(self, message: dict[str, Any]) -> WireNegotiationOffer:
         """Parse an incoming A2A negotiation-offer message."""
         content = message.get("content", message)
-        return NegotiationOffer(
+        return WireNegotiationOffer(
             round=content.get("round", 0),
             price=content.get("price", 0.0),
             scope=content.get("scope", ""),
@@ -753,10 +883,10 @@ class NegotiationExecutor:
             agent_id=content.get("agent_id", ""),
         )
 
-    def handle_accept(self, message: dict[str, Any]) -> NegotiationResult:
+    def handle_accept(self, message: dict[str, Any]) -> WireNegotiationResult:
         """Parse an incoming A2A negotiation-accept message."""
         content = message.get("content", message)
-        return NegotiationResult(
+        return WireNegotiationResult(
             success=True,
             agreed_price=content.get("agreed_price", 0.0),
             total_rounds=content.get("total_rounds", 0),
@@ -766,7 +896,7 @@ class NegotiationExecutor:
     # -- A2A message construction -------------------------------------------
 
     @staticmethod
-    def build_offer_message(offer: NegotiationOffer) -> dict[str, Any]:
+    def build_offer_message(offer: WireNegotiationOffer) -> dict[str, Any]:
         """Build an A2A negotiation-offer metadata payload."""
         return {
             "type": "negotiation-offer",
@@ -774,7 +904,7 @@ class NegotiationExecutor:
         }
 
     @staticmethod
-    def build_counteroffer_message(offer: NegotiationOffer) -> dict[str, Any]:
+    def build_counteroffer_message(offer: WireNegotiationOffer) -> dict[str, Any]:
         """Build an A2A negotiation-counteroffer metadata payload."""
         return {
             "type": "negotiation-counteroffer",

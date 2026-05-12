@@ -98,6 +98,11 @@ class NegotiationResult(BaseModel):
     deal_hash: str = ""
 
 
+# Executor / API wire shapes with the same *names* would collide with the
+# models above; see ``WireNegotiationOffer``, ``WireNegotiationRound``, and
+# ``WireNegotiationResult`` in ``negotiatorgrid.executors.negotiation``.
+
+
 class NegotiationConfig(BaseModel):
     """Parameters controlling a negotiation session."""
 

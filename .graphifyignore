@@ -1,0 +1,13 @@
+# Vendor / forks (not project-authored)
+external/
+
+# Hardhat / TS build noise — not useful for spec↔code linking
+contracts/artifacts/
+contracts/typechain-types/
+contracts/cache/
+
+# Graphify outputs (avoid re-ingesting prior graphs)
+graphify-out/
+
+# Large third-party doc mirror (optional; remove line to include)
+developer-docs/

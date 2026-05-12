@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import time
 import uuid
 from typing import Any
@@ -10,37 +9,22 @@ from typing import Any
 from fastapi import APIRouter, BackgroundTasks, HTTPException
 from pydantic import BaseModel, Field
 
+from negotiatorgrid.api.app_state import ledger
+from negotiatorgrid.api.websocket import broadcaster
 from negotiatorgrid.executors.negotiation import (
     AgentConfig,
     NegotiationExecutor,
     NegotiationParams,
-    NegotiationResult,
-    NegotiationState,
+    WireNegotiationResult,
 )
-from negotiatorgrid.api.websocket import broadcaster
 
 router = APIRouter(prefix="/api")
-
-# ---------------------------------------------------------------------------
-# In-memory storage
-# ---------------------------------------------------------------------------
-
-_negotiations: dict[str, dict[str, Any]] = {}
-_deals: dict[str, dict[str, Any]] = {}
-_stats = {
-    "total_negotiations": 0,
-    "total_deals": 0,
-    "total_rounds": 0,
-    "total_volume": 0.0,
-}
-
-# Shared executor instance
-_executor = NegotiationExecutor()
 
 
 # ---------------------------------------------------------------------------
 # Request / Response schemas
 # ---------------------------------------------------------------------------
+
 
 class AgentConfigSchema(BaseModel):
     agent_id: str = ""
@@ -83,6 +67,7 @@ class NegotiateResponse(BaseModel):
 # Background task runner
 # ---------------------------------------------------------------------------
 
+
 async def _run_negotiation(negotiation_id: str, req: NegotiateRequest) -> None:
     """Run the negotiation engine in the background."""
     buyer = AgentConfig(
@@ -122,26 +107,22 @@ async def _run_negotiation(negotiation_id: str, req: NegotiateRequest) -> None:
         model_latency_budget_ms=req.negotiation_params.model_latency_budget_ms,
     )
 
-    # Wire up broadcaster callbacks
     async def on_round(neg_id: str, neg_round: Any) -> None:
         await broadcaster.broadcast_round(neg_round.to_dict())
 
-    async def on_result(result: NegotiationResult) -> None:
+    async def on_result(result: WireNegotiationResult) -> None:
         await broadcaster.broadcast_result(result.to_dict())
 
     executor = NegotiationExecutor(on_round=on_round, on_result=on_result)
-    _negotiations[negotiation_id]["status"] = "negotiating"
+    ledger.mark_negotiating(negotiation_id)
 
     try:
-        result = await executor.start_negotiation(buyer, seller, params)
+        result = await executor.start_negotiation(
+            buyer, seller, params, negotiation_id=negotiation_id
+        )
         result_dict = result.to_dict()
-        result_dict["negotiation_id"] = negotiation_id
-        _negotiations[negotiation_id].update({
-            "status": "completed" if result.success else "failed",
-            "result": result_dict,
-        })
-        _stats["total_rounds"] += result.total_rounds
 
+        deal: dict[str, Any] | None = None
         if result.success:
             deal = {
                 "deal_hash": result.deal_hash,
@@ -150,6 +131,8 @@ async def _run_negotiation(negotiation_id: str, req: NegotiateRequest) -> None:
                 "total_rounds": result.total_rounds,
                 "buyer_agent": buyer.agent_id,
                 "seller_agent": seller.agent_id,
+                "buyer_wallet": buyer.address,
+                "seller_wallet": seller.address,
                 "buyer_utility": result.buyer_utility,
                 "seller_utility": result.seller_utility,
                 "metrics": result.metrics,
@@ -159,17 +142,22 @@ async def _run_negotiation(negotiation_id: str, req: NegotiateRequest) -> None:
                 "settled": False,
                 "attestation_tx": "",
             }
-            _deals[result.deal_hash] = deal
-            _stats["total_deals"] += 1
-            _stats["total_volume"] += result.agreed_price
+
+        ledger.record_completed_run(
+            negotiation_id,
+            success=result.success,
+            result_dict=result_dict,
+            total_rounds=result.total_rounds,
+            deal=deal,
+        )
     except Exception as exc:
-        _negotiations[negotiation_id]["status"] = "failed"
-        _negotiations[negotiation_id]["error"] = str(exc)
+        ledger.record_run_exception(negotiation_id, str(exc))
 
 
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
+
 
 @router.get("/health")
 async def health_check() -> dict[str, Any]:
@@ -186,16 +174,13 @@ async def health_check() -> dict[str, Any]:
 async def start_negotiation(req: NegotiateRequest, background_tasks: BackgroundTasks) -> NegotiateResponse:
     """Trigger a new bilateral negotiation."""
     negotiation_id = f"neg-{uuid.uuid4().hex[:8]}"
-    _negotiations[negotiation_id] = {
-        "negotiation_id": negotiation_id,
-        "status": "submitted",
-        "buyer_config": req.buyer_config.model_dump(),
-        "seller_config": req.seller_config.model_dump(),
-        "params": req.negotiation_params.model_dump(),
-        "created_at": time.time(),
-        "result": None,
-    }
-    _stats["total_negotiations"] += 1
+    ledger.create_submitted(
+        negotiation_id,
+        buyer_config=req.buyer_config.model_dump(),
+        seller_config=req.seller_config.model_dump(),
+        params=req.negotiation_params.model_dump(),
+        created_at=time.time(),
+    )
 
     background_tasks.add_task(_run_negotiation, negotiation_id, req)
 
@@ -205,62 +190,40 @@ async def start_negotiation(req: NegotiateRequest, background_tasks: BackgroundT
 @router.get("/negotiations")
 async def list_negotiations() -> list[dict[str, Any]]:
     """List all negotiations with status."""
-    return [
-        {
-            "negotiation_id": nid,
-            "status": data["status"],
-            "created_at": data.get("created_at"),
-        }
-        for nid, data in _negotiations.items()
-    ]
+    return ledger.list_negotiation_summaries()
 
 
 @router.get("/negotiations/{negotiation_id}")
 async def get_negotiation(negotiation_id: str) -> dict[str, Any]:
     """Get negotiation detail with full transcript."""
-    if negotiation_id not in _negotiations:
+    row = ledger.get_negotiation(negotiation_id)
+    if row is None:
         raise HTTPException(status_code=404, detail="Negotiation not found")
-    return _negotiations[negotiation_id]
+    return row
 
 
 @router.get("/deals")
 async def list_deals() -> list[dict[str, Any]]:
     """List all completed deals."""
-    return list(_deals.values())
+    return ledger.list_deals()
 
 
 @router.get("/deals/{deal_hash}")
 async def get_deal(deal_hash: str) -> dict[str, Any]:
     """Get deal detail by deal hash."""
-    if deal_hash not in _deals:
+    row = ledger.get_deal(deal_hash)
+    if row is None:
         raise HTTPException(status_code=404, detail="Deal not found")
-    return _deals[deal_hash]
+    return row
 
 
 @router.get("/agents/{address}/reputation")
 async def get_agent_reputation(address: str) -> dict[str, Any]:
     """Get agent reputation summary (mock)."""
-    agent_deals = [d for d in _deals.values() if address in (d.get("buyer_agent", ""), d.get("seller_agent", ""))]
-    total = len(agent_deals)
-    avg_price = sum(d["agreed_price"] for d in agent_deals) / total if total else 0
-    return {
-        "address": address,
-        "total_deals": total,
-        "average_price": round(avg_price, 6),
-        "reputation_score": min(100, 50 + total * 5),
-        "positive_feedback": total,
-        "negative_feedback": 0,
-    }
+    return ledger.reputation_summary(address)
 
 
 @router.get("/stats")
 async def get_stats() -> dict[str, Any]:
     """Dashboard aggregate stats."""
-    avg_rounds = _stats["total_rounds"] / max(_stats["total_negotiations"], 1)
-    return {
-        "total_negotiations": _stats["total_negotiations"],
-        "total_deals": _stats["total_deals"],
-        "avg_rounds": round(avg_rounds, 1),
-        "total_volume": round(_stats["total_volume"], 6),
-        "passport_status": "stubbed",
-    }
+    return ledger.dashboard_stats()

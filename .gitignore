@@ -22,3 +22,7 @@ dist/
 build/
 .pytest_cache/
 .ruff_cache/
+
+# Graphify AST cache (regenerate with `graphify update .`)
+graphify-out/cache/
+graphify_chunk_*.json

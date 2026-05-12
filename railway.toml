@@ -1,0 +1,23 @@
+# Railway deployment config for the NegotiatorGrid backend (FastAPI).
+#
+# Deploy:
+#   railway init
+#   railway variables set \
+#     OPENAI_API_KEY=sk-... \
+#     BUYER_PRIVATE_KEY=0x... \
+#     SELLER_PRIVATE_KEY=0x... \
+#     KITE_RPC_URL=https://rpc-testnet.gokite.ai/ \
+#     X402_FACILITATOR_URL=https://facilitator.pieverse.io \
+#     CORS_ORIGINS=https://<dashboard>.vercel.app
+#   railway up
+
+[build]
+builder = "dockerfile"
+dockerfilePath = "Dockerfile"
+
+[deploy]
+startCommand = "uvicorn negotiatorgrid.api.server:app --host 0.0.0.0 --port $PORT"
+healthcheckPath = "/api/health"
+healthcheckTimeout = 30
+restartPolicyType = "on_failure"
+restartPolicyMaxRetries = 5

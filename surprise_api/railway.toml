@@ -1,0 +1,21 @@
+# Railway deployment config for the Surprise API x402 seller.
+#
+# Deploy:
+#   railway init
+#   railway variables set \
+#     SURPRISE_API_SELLER_WALLET=0x... \
+#     X402_FACILITATOR_URL=https://facilitator.pieverse.io \
+#     KITE_NETWORK=eip155:2368 \
+#     CORS_ORIGINS=https://<dashboard>.vercel.app
+#   railway up
+
+[build]
+builder = "dockerfile"
+dockerfilePath = "surprise_api/Dockerfile"
+
+[deploy]
+startCommand = "uvicorn surprise_api.app:app --host 0.0.0.0 --port $PORT"
+healthcheckPath = "/healthz"
+healthcheckTimeout = 30
+restartPolicyType = "on_failure"
+restartPolicyMaxRetries = 5

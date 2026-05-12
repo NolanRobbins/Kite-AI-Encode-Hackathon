@@ -3,17 +3,23 @@
 from __future__ import annotations
 
 import logging
-import os
 import time
 from typing import Any
 
 import httpx
 from eth_account import Account
-from eth_account.messages import encode_typed_data
 from web3 import Web3
 
 from negotiatorgrid.config import X402Config, config
 from negotiatorgrid.core.types import PaymentRequirements, SettlementResult
+from negotiatorgrid.core.x402_eip712 import (
+    DEFAULT_MAX_TIMEOUT_SECONDS,
+    EIP712_DOMAIN_TOKEN_NAME,
+    EIP712_DOMAIN_TOKEN_VERSION,
+    X402_JSON_VERSION,
+    build_transfer_with_authorization_typed_data,
+    chain_id_from_eip155,
+)
 from negotiatorgrid.utils.mock_facilitator import MockFacilitator
 
 logger = logging.getLogger(__name__)
@@ -24,6 +30,24 @@ PERMANENT_FAILURES = frozenset({
     "invalid_exact_evm_insufficient_balance",
     "invalid_exact_evm_signature",
 })
+
+
+class DealHashMismatchError(Exception):
+    """Raised when payment requirements don't match the negotiated deal."""
+
+    def __init__(
+        self,
+        message: str,
+        field: str = "",
+        expected: Any = None,
+        actual: Any = None,
+        actual_atomic: int | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.field = field
+        self.expected = expected
+        self.actual = actual
+        self.actual_atomic = actual_atomic
 
 
 class X402Settler:
@@ -61,15 +85,72 @@ class X402Settler:
             "resource": resource_url,
             "payTo": Web3.to_checksum_address(seller_wallet),
             "asset": config.kite.test_usdt_addr,
-            "maxTimeoutSeconds": 300,
+            "maxTimeoutSeconds": DEFAULT_MAX_TIMEOUT_SECONDS,
             "extra": {
-                "name": "USDT",
-                "version": "2",
+                "name": EIP712_DOMAIN_TOKEN_NAME,
+                "version": EIP712_DOMAIN_TOKEN_VERSION,
                 "facilitator": self._config.facilitator_url,
                 **({"deal_hash": deal_hash} if deal_hash else {}),
                 "negotiation_protocol": "negotiatorgrid-v1",
             },
         }
+
+    def verify_payment_requirements(
+        self,
+        agreed_price_atomic: int,
+        deal_hash: str,
+        seller_wallet: str,
+        resource_url: str,
+        payment_requirements: dict[str, Any],
+    ) -> None:
+        """Verify that payment requirements match the agreed deal terms.
+
+        Raises:
+            DealHashMismatchError: If any field doesn't match expected values.
+        """
+        # Verify amount
+        actual_amount = int(payment_requirements.get("maxAmountRequired", "0"))
+        if actual_amount != agreed_price_atomic:
+            raise DealHashMismatchError(
+                f"Payment amount mismatch: expected {agreed_price_atomic}, got {actual_amount}",
+                field="maxAmountRequired",
+                expected=agreed_price_atomic,
+                actual=actual_amount,
+                actual_atomic=actual_amount,
+            )
+
+        # Verify seller wallet
+        actual_payto = payment_requirements.get("payTo", "").lower()
+        expected_payto = Web3.to_checksum_address(seller_wallet).lower()
+        if actual_payto != expected_payto:
+            raise DealHashMismatchError(
+                f"Payment recipient mismatch: expected {expected_payto}, got {actual_payto}",
+                field="payTo",
+                expected=expected_payto,
+                actual=actual_payto,
+            )
+
+        # Verify resource URL
+        actual_resource = payment_requirements.get("resource", "")
+        if actual_resource != resource_url:
+            raise DealHashMismatchError(
+                f"Resource URL mismatch: expected {resource_url}, got {actual_resource}",
+                field="resource",
+                expected=resource_url,
+                actual=actual_resource,
+            )
+
+        # Verify deal hash in extra field (if deal_hash is provided)
+        if deal_hash:
+            extra = payment_requirements.get("extra", {})
+            actual_deal_hash = extra.get("deal_hash", "")
+            if actual_deal_hash != deal_hash:
+                raise DealHashMismatchError(
+                    f"Deal hash mismatch: expected {deal_hash}, got {actual_deal_hash}",
+                    field="deal_hash",
+                    expected=deal_hash,
+                    actual=actual_deal_hash,
+                )
 
     async def settle_payment(
         self,
@@ -97,7 +178,9 @@ class X402Settler:
 
         # Build EIP-712 typed-data payload
         nonce = Web3.keccak(text=f"{account.address}{time.time_ns()}").hex()
-        valid_before = int(time.time()) + payment_requirements.get("maxTimeoutSeconds", 300)
+        valid_before = int(time.time()) + payment_requirements.get(
+            "maxTimeoutSeconds", DEFAULT_MAX_TIMEOUT_SECONDS
+        )
 
         authorization = {
             "from": account.address,
@@ -109,8 +192,8 @@ class X402Settler:
         }
 
         # Sign the authorization
-        typed_data = _build_eip712_typed_data(
-            authorization, asset, int(self._config.network.split(":")[-1])
+        typed_data = build_transfer_with_authorization_typed_data(
+            authorization, asset, chain_id_from_eip155(self._config.network)
         )
         try:
             signed = account.sign_typed_data(
@@ -124,7 +207,7 @@ class X402Settler:
             return SettlementResult(success=False, error_reason="signing_failed")
 
         payment_payload = {
-            "x402Version": 1,
+            "x402Version": X402_JSON_VERSION,
             "scheme": self._config.scheme,
             "network": self._config.network,
             "payload": {
@@ -227,39 +310,5 @@ class X402Settler:
         )
 
 
-# ------------------------------------------------------------------
-# EIP-712 helpers
-# ------------------------------------------------------------------
-
-def _build_eip712_typed_data(
-    authorization: dict[str, Any],
-    asset_address: str,
-    chain_id: int,
-) -> dict[str, Any]:
-    """Build EIP-712 typed data for TransferWithAuthorization (EIP-3009)."""
-    return {
-        "domain": {
-            "name": "USDT",
-            "version": "2",
-            "chainId": chain_id,
-            "verifyingContract": asset_address,
-        },
-        "types": {
-            "TransferWithAuthorization": [
-                {"name": "from", "type": "address"},
-                {"name": "to", "type": "address"},
-                {"name": "value", "type": "uint256"},
-                {"name": "validAfter", "type": "uint256"},
-                {"name": "validBefore", "type": "uint256"},
-                {"name": "nonce", "type": "bytes32"},
-            ],
-        },
-        "message": {
-            "from": authorization["from"],
-            "to": authorization["to"],
-            "value": int(authorization["value"]),
-            "validAfter": int(authorization["validAfter"]),
-            "validBefore": int(authorization["validBefore"]),
-            "nonce": authorization["nonce"],
-        },
-    }
+# Backwards-compatible name for callers that imported the private helper.
+_build_eip712_typed_data = build_transfer_with_authorization_typed_data

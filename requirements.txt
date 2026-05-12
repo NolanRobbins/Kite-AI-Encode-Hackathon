@@ -1,0 +1,16 @@
+# Runtime dependencies for container builds (surprise_api + backend).
+# Full dev/test deps live in pyproject.toml [project.optional-dependencies].
+# Keep in sync with pyproject.toml [project] dependencies.
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0
+websockets>=13.0
+httpx>=0.27.0
+pydantic>=2.0.0
+python-dotenv>=1.0.0
+eth-account>=0.13.0
+web3>=7.0.0
+aiosqlite>=0.20.0
+# negotiatorgrid imports — pulled in by surprise_api's discovery registration
+# and by the backend's negotiation engine:
+openai>=1.0.0
+negmas>=0.10.0

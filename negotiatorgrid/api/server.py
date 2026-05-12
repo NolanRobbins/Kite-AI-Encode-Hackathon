@@ -11,6 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from negotiatorgrid.api.agent_card import AGENT_CARD
+from negotiatorgrid.api.act3_compare import router as act3_router
 from negotiatorgrid.api.routes import router as api_router
 from negotiatorgrid.api.websocket import router as ws_router
 
@@ -47,6 +48,7 @@ app.add_middleware(
 
 # Mount routers
 app.include_router(api_router)
+app.include_router(act3_router)
 app.include_router(ws_router)
 
 
