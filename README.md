@@ -169,6 +169,17 @@ pip install -e .
 python demo.py
 ```
 
+For the hackathon submission run path (stable dashboard + optional Act 3), see [DEMO_STABLE.md](DEMO_STABLE.md).
+
+Fast local dashboard startup from repo root:
+
+```powershell
+.\scripts\run_negotiatorgrid_api.ps1
+.\scripts\run_dashboard.ps1
+```
+
+Then open `http://localhost:3000`.
+
 The demo runs a complete 7-round bilateral negotiation between a buyer agent ("DataBuyer-Alpha") and a seller agent ("WeatherPro-Service"), including ERC-8004 identity registration, reputation lookup, NegMAS negotiation with opponent modeling, Nash equilibrium validation, x402 settlement, and on-chain attestation — all with formatted terminal output and an ASCII price convergence chart.
 
 ### Requirements
