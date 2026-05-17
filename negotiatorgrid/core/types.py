@@ -4,10 +4,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Literal
+from typing import Any
 
 from pydantic import BaseModel, Field
-
 
 # ---------------------------------------------------------------------------
 # Legacy dataclass types (kept for backward compatibility with existing code)
@@ -96,6 +95,8 @@ class NegotiationResult(BaseModel):
     duration_ms: float = 0.0
     nash_check_passed: bool | None = None
     deal_hash: str = ""
+    #: Unix second frozen at agreement; drives binding hash + on-chain timestamp.
+    deal_bound_at: int = 0
 
 
 # Executor / API wire shapes with the same *names* would collide with the

@@ -1,5 +1,5 @@
 export type AgentRole = "buyer" | "seller";
-export type BargainingTendency = "dominant" | "balanced" | "cooperative";
+export type BargainingTendency = "dominant" | "balanced" | "submissive" | "cooperative";
 export type ObjectiveMode =
   | "fairness_guardrail"
   | "buyer_advantage"
@@ -16,6 +16,7 @@ export interface ReasoningSummary {
 }
 
 export interface LiveNegotiationRound {
+  negotiation_id?: string;
   round: number;
   buyer_offer: number | null;
   seller_offer: number | null;
@@ -40,13 +41,18 @@ export interface LiveNegotiationRound {
 export interface ModelRuntimeMetrics {
   model_mode?: ModelMode;
   provider?: string;
+  base_url?: string;
+  api_configured?: boolean;
   model?: string;
   model_calls?: number;
   fallback_messages?: number;
+  last_error?: string;
   avg_model_latency_ms?: number;
   total_model_latency_ms?: number;
   latency_budget_ms?: number;
   runtime_note?: string;
+  buyer_runtime?: ModelRuntimeMetrics;
+  seller_runtime?: ModelRuntimeMetrics;
 }
 
 export interface SandboxPosture {
@@ -146,4 +152,15 @@ export interface NegotiationControls {
 export interface StreamMessage {
   type: "round_update" | "negotiation_result" | "error" | string;
   data: LiveNegotiationRound | NegotiationResult | Record<string, unknown>;
+}
+
+/** WebSocket ``pipeline_stage`` payload — mirrors ``demo.py`` stages in the API. */
+export interface PipelineStageEvent {
+  phase: string;
+  title?: string;
+  detail?: string;
+  url?: string;
+  wallet?: string;
+  score?: number;
+  [key: string]: unknown;
 }

@@ -9,6 +9,7 @@ __pycache__/
 .DS_Store
 Thumbs.db
 *.log
+logs/negotiation_traces/*.json
 
 # Hardhat
 contracts/artifacts/
@@ -31,3 +32,4 @@ graphify_chunk_*.json
 .cursor/
 .graphify*
 graphify-out/
+.kite-passport/

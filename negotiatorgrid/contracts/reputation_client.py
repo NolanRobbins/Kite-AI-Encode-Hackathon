@@ -5,18 +5,22 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from eth_account import Account
 from web3 import Web3
 
 from negotiatorgrid.utils.web3_helpers import load_abi, send_transaction
 
 logger = logging.getLogger(__name__)
 
-# Inline ABI for when the JSON file is not yet available.
+# Inline ABI matching the deployed ReputationRegistry on Kite Testnet (chain 2368).
+# ``giveFeedback`` includes a ``valueDecimals`` byte (int128 precision)
+# per the ERC-8004 spec.
 REPUTATION_REGISTRY_ABI: list[dict[str, Any]] = [
     {
         "inputs": [
             {"internalType": "uint256", "name": "agentId", "type": "uint256"},
-            {"internalType": "int8", "name": "value", "type": "int8"},
+            {"internalType": "int128", "name": "value", "type": "int128"},
+            {"internalType": "uint8", "name": "valueDecimals", "type": "uint8"},
             {"internalType": "string", "name": "tag1", "type": "string"},
             {"internalType": "string", "name": "tag2", "type": "string"},
             {"internalType": "string", "name": "endpoint", "type": "string"},
@@ -122,9 +126,17 @@ class ReputationClient:
             return fake_hash
 
         try:
+            sender = Account.from_key(self._private_key).address
             tx = self._contract.functions.giveFeedback(
-                agent_id, value, tag1, tag2, endpoint, feedback_uri, feedback_hash
-            ).build_transaction({"chainId": self._w3.eth.chain_id})
+                agent_id,
+                int(value),
+                0,  # valueDecimals: pass 0 → ``value`` interpreted as plain integer
+                tag1,
+                tag2,
+                endpoint,
+                feedback_uri,
+                feedback_hash,
+            ).build_transaction({"chainId": self._w3.eth.chain_id, "from": sender})
             return await send_transaction(self._w3, tx, self._private_key)
         except Exception:
             logger.exception("giveFeedback failed")

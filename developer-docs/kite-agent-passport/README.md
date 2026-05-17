@@ -100,7 +100,7 @@ The complete payment flow:
 
 **Invitation only:** Kite Agent Passport is currently invitation-only during testnet. If you don't have an invitation, you may not be able to complete all steps. See the [Testnet Notice](testnet-notice.md) for details.
 
-1. Use your invitation link to open the [Kite Portal](https://x402-portal-eight.vercel.app/) and configure your account.
+1. Use your invitation link to open the [Kite Portal](https://agentpassport.ai/dashboard) and configure your account.
 2. Connect your wallet and complete signature authentication.
 3. On-ramp testnet tokens to your wallet.
 4. Create an agent and set its spending rules.
@@ -134,7 +134,7 @@ Kite Agent Passport is part of the broader Kite mission: **building the agentic 
 ## Need Help?
 
 - [Testnet Notice](testnet-notice.md) — Status and known issues
-- [Kite Portal](https://x402-portal-eight.vercel.app/) — Dashboard and transactions
+- [Kite Portal](https://agentpassport.ai/dashboard) — Dashboard and transactions
 - [Report an issue](https://github.com/gokite-ai/developer-docs/issues/new/choose) — Bugs or feedback
 
 ---

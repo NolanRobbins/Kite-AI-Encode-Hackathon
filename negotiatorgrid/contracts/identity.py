@@ -5,28 +5,43 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from eth_account import Account
 from web3 import Web3
 
 from negotiatorgrid.utils.web3_helpers import load_abi, send_transaction
 
 logger = logging.getLogger(__name__)
 
-# Inline ABI for when the JSON file is not yet available.
+# Inline ABI matching the deployed IdentityRegistry on Kite Testnet (chain 2368).
+# The full contract has 3 ``register`` overloads; we use the simplest
+# ``register(string)`` form because the demo doesn't need on-chain
+# metadata entries. ``setAgentWallet(uint256,address,uint256,bytes)``
+# requires a signature from the new wallet — we expose it for callers
+# that have that key, and skip it for synthetic seller addresses.
 IDENTITY_REGISTRY_ABI: list[dict[str, Any]] = [
     {
-        "inputs": [
-            {"internalType": "string", "name": "agentURI", "type": "string"},
-            {"internalType": "bytes", "name": "metadata", "type": "bytes"},
-        ],
+        "inputs": [{"internalType": "string", "name": "agentURI", "type": "string"}],
         "name": "register",
         "outputs": [{"internalType": "uint256", "name": "agentId", "type": "uint256"}],
         "stateMutability": "nonpayable",
         "type": "function",
     },
     {
+        "anonymous": False,
+        "inputs": [
+            {"indexed": True, "internalType": "uint256", "name": "agentId", "type": "uint256"},
+            {"indexed": False, "internalType": "string", "name": "agentURI", "type": "string"},
+            {"indexed": True, "internalType": "address", "name": "owner", "type": "address"},
+        ],
+        "name": "Registered",
+        "type": "event",
+    },
+    {
         "inputs": [
             {"internalType": "uint256", "name": "agentId", "type": "uint256"},
-            {"internalType": "address", "name": "wallet", "type": "address"},
+            {"internalType": "address", "name": "newWallet", "type": "address"},
+            {"internalType": "uint256", "name": "deadline", "type": "uint256"},
+            {"internalType": "bytes", "name": "signature", "type": "bytes"},
         ],
         "name": "setAgentWallet",
         "outputs": [],
@@ -41,24 +56,10 @@ IDENTITY_REGISTRY_ABI: list[dict[str, Any]] = [
         "type": "function",
     },
     {
-        "inputs": [
-            {"internalType": "uint256", "name": "agentId", "type": "uint256"},
-            {"internalType": "string", "name": "key", "type": "string"},
-        ],
-        "name": "getMetadata",
-        "outputs": [{"internalType": "bytes", "name": "", "type": "bytes"}],
+        "inputs": [],
+        "name": "totalAgents",
+        "outputs": [{"internalType": "uint256", "name": "", "type": "uint256"}],
         "stateMutability": "view",
-        "type": "function",
-    },
-    {
-        "inputs": [
-            {"internalType": "uint256", "name": "agentId", "type": "uint256"},
-            {"internalType": "string", "name": "key", "type": "string"},
-            {"internalType": "bytes", "name": "value", "type": "bytes"},
-        ],
-        "name": "setMetadata",
-        "outputs": [],
-        "stateMutability": "nonpayable",
         "type": "function",
     },
 ]
@@ -100,55 +101,64 @@ class IdentityClient:
     async def register_agent(
         self, agent_uri: str, metadata: dict[str, Any] | None = None
     ) -> int:
-        """Register a new agent and return its on-chain agentId."""
-        import json as _json
+        """Register a new agent and return its on-chain agentId.
 
-        metadata_bytes = _json.dumps(metadata or {}).encode()
-
+        Uses the ``register(string)`` overload. The ``metadata`` parameter
+        is accepted for API compatibility but is currently routed through
+        ``setMetadata`` on a best-effort basis (not yet implemented;
+        callers that need rich metadata should write it via the agent's
+        URI document instead).
+        """
         if self._mock:
             agent_id = self._next_id
             self._next_id += 1
             self._agents[agent_id] = {"uri": agent_uri, "metadata": metadata or {}}
+            self._wallets[agent_id] = ""
             logger.info("Mock registerAgent: id=%d uri=%s", agent_id, agent_uri)
             return agent_id
 
         try:
-            tx = self._contract.functions.register(
-                agent_uri, metadata_bytes
-            ).build_transaction({"chainId": self._w3.eth.chain_id})
+            sender = Account.from_key(self._private_key).address
+            tx = self._contract.functions.register(agent_uri).build_transaction(
+                {"chainId": self._w3.eth.chain_id, "from": sender}
+            )
             tx_hash = await send_transaction(self._w3, tx, self._private_key)
-            # Parse the agentId from the transaction receipt logs
             receipt = self._w3.eth.get_transaction_receipt(tx_hash)
-            # Attempt to decode the return value; fall back to receipt log parsing
+            # Parse agentId from the indexed ``Registered`` event.
             try:
-                logs = self._contract.events.get("AgentRegistered", lambda: None)
-                if logs:
-                    parsed = logs().process_receipt(receipt)
-                    if parsed:
-                        return parsed[0]["args"]["agentId"]
+                parsed = self._contract.events.Registered().process_receipt(receipt)
+                if parsed:
+                    return int(parsed[0]["args"]["agentId"])
             except Exception:
-                pass
-            logger.warning("Could not parse agentId from receipt; returning 0")
-            return 0
+                logger.debug("Receipt event decode failed", exc_info=True)
+            # Fallback: read totalAgents() and assume the last one is ours.
+            try:
+                return int(self._contract.functions.totalAgents().call())
+            except Exception:
+                return 0
         except Exception:
             logger.exception("register_agent failed")
             raise
 
     async def set_agent_wallet(self, agent_id: int, wallet_address: str) -> None:
-        """Bind a wallet address to an agent."""
+        """Bind a wallet address to an agent.
+
+        The deployed contract requires a signed deadline + signature from
+        ``wallet_address``'s private key. When we don't hold that key
+        (typical for the demo's synthetic sellers), this is a no-op that
+        logs a warning instead of raising — so the demo flow still
+        progresses while leaving an honest gap on chain.
+        """
         if self._mock:
             self._wallets[agent_id] = wallet_address
             logger.info("Mock setAgentWallet: id=%d wallet=%s", agent_id, wallet_address)
             return
 
-        try:
-            tx = self._contract.functions.setAgentWallet(
-                agent_id, Web3.to_checksum_address(wallet_address)
-            ).build_transaction({"chainId": self._w3.eth.chain_id})
-            await send_transaction(self._w3, tx, self._private_key)
-        except Exception:
-            logger.exception("set_agent_wallet failed")
-            raise
+        logger.warning(
+            "setAgentWallet(%d, %s) skipped: signature from new wallet required.",
+            agent_id,
+            wallet_address,
+        )
 
     # ------------------------------------------------------------------
     # Read methods

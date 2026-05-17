@@ -360,6 +360,9 @@ class TestOfferGenerator:
         msg = gen.generate_buyer_offer(round_num=1, price=45.0)
         assert len(msg) > 0
         assert "45.00" in msg
+        metrics = gen.runtime_metrics()
+        assert metrics["fallback_messages"] >= 1
+        assert metrics["last_error"] in {"mode_policy_only", "missing_api_key"}
 
     def test_template_fallback_seller_counter(self):
         gen = OfferGenerator(api_key="")

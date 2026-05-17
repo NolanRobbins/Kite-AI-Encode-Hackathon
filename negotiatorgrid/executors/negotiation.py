@@ -3,17 +3,21 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
-import json
 import logging
 import time
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field, is_dataclass
 from enum import Enum
 from typing import Any, Callable, Optional
 
-from negotiatorgrid.core.negotiation import NegotiationSession
+from negotiatorgrid.config import config
+from negotiatorgrid.core.deal_hash import (
+    binding_deal_hash_hex,
+    compute_binding_deal_hash_bytes,
+    compute_binding_deal_hash_hex_from_result,
+)
 from negotiatorgrid.core.nash_guardrail import NashGuardrail
+from negotiatorgrid.core.negotiation import NegotiationSession
 from negotiatorgrid.core.opponent_model import OpponentModeler
 from negotiatorgrid.core.types import NegotiationConfig as CoreNegConfig
 from negotiatorgrid.core.types import NegotiationOffer as CoreOffer
@@ -119,6 +123,8 @@ class WireNegotiationResult:
     agreed_price: float = 0.0
     total_rounds: int = 0
     deal_hash: str = ""
+    #: Unix second frozen at agreement; must match attestation binding hash.
+    deal_bound_at: int = 0
     buyer_utility: float = 0.0
     seller_utility: float = 0.0
     duration_seconds: float = 0.0
@@ -127,6 +133,8 @@ class WireNegotiationResult:
     objective_mode: str = "fairness_guardrail"
     passport_status: str = "stubbed"
     reason: str = ""
+    discovery: dict[str, Any] | None = None
+    verification: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -135,6 +143,7 @@ class WireNegotiationResult:
             "agreed_price": self.agreed_price,
             "total_rounds": self.total_rounds,
             "deal_hash": self.deal_hash,
+            "deal_bound_at": self.deal_bound_at,
             "buyer_utility": self.buyer_utility,
             "seller_utility": self.seller_utility,
             "duration_seconds": self.duration_seconds,
@@ -143,6 +152,8 @@ class WireNegotiationResult:
             "objective_mode": self.objective_mode,
             "passport_status": self.passport_status,
             "reason": self.reason,
+            "discovery": self.discovery,
+            "verification": self.verification,
         }
 
 
@@ -165,6 +176,8 @@ class AgentConfig:
     reputation_score: float = 50.0
     grid_enabled: bool = True
     tendency: str = ""
+    malicious_seller: bool = False
+    seller_agent_id: int = 0
 
 
 @dataclass
@@ -181,6 +194,9 @@ class NegotiationParams:
     model_provider: str = "template"
     model_name: str = "template"
     model_latency_budget_ms: int = 1200
+    #: ``legacy`` = short text fingerprint; ``canonical_eip712`` = same hash as
+    #: ``DealRecord`` / ``demo.py`` / ``surprise_api`` admin sync (keccak ABI).
+    deal_binding_mode: str = "legacy"
 
 
 # ---------------------------------------------------------------------------
@@ -207,18 +223,9 @@ _TENDENCY_LABELS: dict[str, str] = {
     "dominant": "dominant",
     "aggressive": "dominant",
     "balanced": "balanced",
-    "cooperative": "cooperative",
-    "submissive": "cooperative",
+    "cooperative": "submissive",
+    "submissive": "submissive",
 }
-
-
-def compute_deal_hash(negotiation_id: str, agreed_price: float, rounds: int) -> str:
-    """Compute a keccak-like hash (sha256 stand-in) for the deal."""
-    payload = json.dumps(
-        {"negotiation_id": negotiation_id, "agreed_price": agreed_price, "rounds": rounds},
-        sort_keys=True,
-    )
-    return "0x" + hashlib.sha256(payload.encode()).hexdigest()
 
 
 def _normalise_objective_mode(value: str) -> str:
@@ -320,8 +327,9 @@ def _sandbox_posture(model_mode: str) -> dict[str, Any]:
         "free_text_can_execute_actions": False,
         "mcp_tools_enabled": False,
         "note": (
-            "Buyer and seller run as separate negotiation policies with separate reservation bounds. "
-            "They do not receive filesystem, wallet, or MCP tools. Only typed negotiation state is sent "
+            "Buyer and seller run as separate negotiation policies with "
+            "separate reservation bounds. They do not receive filesystem, "
+            "wallet, or MCP tools. Only typed negotiation state is sent "
             "to the language layer, and numeric protocol fields win over prose."
         ),
     }
@@ -336,6 +344,59 @@ def _edge_case_status(max_rounds: int, timeout_seconds: int) -> dict[str, Any]:
         "streaming_policy": "round_updates_only_no_mid_round_price_mutation",
         "payment_failure_policy": "mock_or_retry_later_until_kite_passport_ready",
         "mcp_policy": "disabled_until_trust_gate_and_sandbox_are_configured",
+    }
+
+
+def _combine_runtime_metrics(
+    model_mode: str,
+    buyer_runtime: dict[str, Any],
+    seller_runtime: dict[str, Any],
+) -> dict[str, Any]:
+    buyer_calls = int(buyer_runtime.get("model_calls") or 0)
+    seller_calls = int(seller_runtime.get("model_calls") or 0)
+    total_calls = buyer_calls + seller_calls
+
+    buyer_fallbacks = int(buyer_runtime.get("fallback_messages") or 0)
+    seller_fallbacks = int(seller_runtime.get("fallback_messages") or 0)
+    total_fallbacks = buyer_fallbacks + seller_fallbacks
+
+    buyer_total_latency = float(buyer_runtime.get("total_model_latency_ms") or 0.0)
+    seller_total_latency = float(seller_runtime.get("total_model_latency_ms") or 0.0)
+    total_latency = buyer_total_latency + seller_total_latency
+    avg_latency = total_latency / total_calls if total_calls else 0.0
+
+    buyer_provider = str(buyer_runtime.get("provider") or "buyer")
+    seller_provider = str(seller_runtime.get("provider") or "seller")
+    buyer_model = str(buyer_runtime.get("model") or "template")
+    seller_model = str(seller_runtime.get("model") or "template")
+
+    if model_mode in {"llm", "reasoning_llm"}:
+        runtime_note = (
+            "Buyer and seller use independent model sandboxes. "
+            "Typed protocol fields remain authoritative."
+        )
+    elif model_mode == "slm":
+        runtime_note = (
+            "SLM mode uses lightweight language generation with deterministic core policy."
+        )
+    else:
+        runtime_note = "Policy-only mode uses deterministic negotiation state and template language."
+
+    return {
+        "model_mode": model_mode,
+        "provider": f"{buyer_provider}|{seller_provider}",
+        "model": f"{buyer_model}|{seller_model}",
+        "model_calls": total_calls,
+        "fallback_messages": total_fallbacks,
+        "avg_model_latency_ms": round(avg_latency, 2),
+        "total_model_latency_ms": round(total_latency, 2),
+        "latency_budget_ms": max(
+            int(buyer_runtime.get("latency_budget_ms") or 0),
+            int(seller_runtime.get("latency_budget_ms") or 0),
+        ),
+        "runtime_note": runtime_note,
+        "buyer_runtime": buyer_runtime,
+        "seller_runtime": seller_runtime,
     }
 
 
@@ -410,7 +471,8 @@ class _TranscriptEnrichmentContext:
     objective_mode: str
     buyer_om: Optional[OpponentModeler]
     seller_om: Optional[OpponentModeler]
-    offer_gen: OfferGenerator
+    buyer_offer_gen: OfferGenerator
+    seller_offer_gen: OfferGenerator
     guardrail: NashGuardrail
     core_config: CoreNegConfig
 
@@ -421,7 +483,8 @@ class _TranscriptEnrichmentOutcome:
 
     rounds: list[WireNegotiationRound]
     last_nash_result: Any
-    offer_gen: OfferGenerator
+    buyer_offer_gen: OfferGenerator
+    seller_offer_gen: OfferGenerator
 
 
 # ---------------------------------------------------------------------------
@@ -442,11 +505,31 @@ class NegotiationExecutor:
         self,
         on_round: Optional[Callable] = None,
         on_result: Optional[Callable] = None,
+        discovery_service: Any = None,
+        discovery_capability: str = "",
+        enforce_verification: bool = False,
     ):
         self.state = NegotiationState.IDLE
         self._negotiations: dict[str, dict[str, Any]] = {}
         self._on_round = on_round
         self._on_result = on_result
+        self._discovery_service = discovery_service
+        self._discovery_capability = discovery_capability
+        self._enforce_verification = enforce_verification
+
+    @staticmethod
+    def _metadata_to_dict(value: Any) -> dict[str, Any]:
+        if value is None:
+            return {}
+        if hasattr(value, "to_dict"):
+            return dict(value.to_dict())
+        if hasattr(value, "model_dump"):
+            return dict(value.model_dump())
+        if is_dataclass(value):
+            return asdict(value)
+        if isinstance(value, dict):
+            return dict(value)
+        return {"value": value}
 
     @staticmethod
     def _resolve_negotiation_id(negotiation_id: str | None) -> str:
@@ -534,6 +617,86 @@ class NegotiationExecutor:
         return neg_session.run()
 
     @staticmethod
+    def _build_offer_generators(
+        neg_config: NegotiationParams,
+        model_mode: str,
+    ) -> tuple[OfferGenerator, OfferGenerator]:
+        buyer_model = (config.llm.model or "gpt-4o-mini").strip() or "gpt-4o-mini"
+        seller_model = (config.llm.xai_model or "grok-4").strip() or "grok-4"
+        seller_base_url = (config.llm.xai_base_url or "https://api.x.ai/v1").strip()
+
+        if model_mode == "llm":
+            buyer = OfferGenerator(
+                api_key=config.llm.api_key,
+                model=buyer_model,
+                model_mode=model_mode,
+                provider="openai",
+                latency_budget_ms=neg_config.model_latency_budget_ms,
+            )
+            seller = OfferGenerator(
+                api_key=config.llm.xai_api_key,
+                model=seller_model,
+                model_mode=model_mode,
+                provider="xai",
+                latency_budget_ms=neg_config.model_latency_budget_ms,
+                base_url=seller_base_url,
+            )
+            return buyer, seller
+
+        if model_mode == "reasoning_llm":
+            buyer = OfferGenerator(
+                api_key=config.llm.api_key,
+                model=buyer_model,
+                model_mode=model_mode,
+                provider="openai",
+                latency_budget_ms=neg_config.model_latency_budget_ms,
+            )
+            seller = OfferGenerator(
+                api_key=config.llm.xai_api_key,
+                model=seller_model,
+                model_mode=model_mode,
+                provider="xai",
+                latency_budget_ms=neg_config.model_latency_budget_ms,
+                base_url=seller_base_url,
+            )
+            return buyer, seller
+
+        if model_mode == "slm":
+            return (
+                OfferGenerator(
+                    api_key="",
+                    model="local-small-buyer",
+                    model_mode=model_mode,
+                    provider="slm-buyer",
+                    latency_budget_ms=neg_config.model_latency_budget_ms,
+                ),
+                OfferGenerator(
+                    api_key="",
+                    model="local-small-seller",
+                    model_mode=model_mode,
+                    provider="slm-seller",
+                    latency_budget_ms=neg_config.model_latency_budget_ms,
+                ),
+            )
+
+        return (
+            OfferGenerator(
+                api_key="",
+                model=buyer_model,
+                model_mode=model_mode,
+                provider="template-buyer",
+                latency_budget_ms=neg_config.model_latency_budget_ms,
+            ),
+            OfferGenerator(
+                api_key="",
+                model=seller_model,
+                model_mode=model_mode,
+                provider="template-seller",
+                latency_budget_ms=neg_config.model_latency_budget_ms,
+            ),
+        )
+
+    @staticmethod
     def _group_core_offers_by_round(
         transcript: list[CoreOffer],
     ) -> tuple[dict[int, CoreOffer], dict[int, CoreOffer]]:
@@ -561,6 +724,15 @@ class NegotiationExecutor:
         previous_buyer_price: float | None = None
         previous_seller_price: float | None = None
         last_nash_result = None
+        model_mode = ctx.buyer_offer_gen.model_mode
+        if model_mode == "reasoning_llm":
+            stream_delay = 0.45
+        elif model_mode == "llm":
+            stream_delay = 0.35
+        elif model_mode == "slm":
+            stream_delay = 0.2
+        else:
+            stream_delay = 0.12
 
         for rnd in all_round_nums:
             r_num = rnd + 1
@@ -572,11 +744,11 @@ class NegotiationExecutor:
             buyer_nl = ""
             seller_nl = ""
             if buyer_display_price is not None:
-                buyer_nl = ctx.offer_gen.generate_buyer_offer(
+                buyer_nl = ctx.buyer_offer_gen.generate_buyer_offer(
                     round_num=r_num, price=buyer_display_price
                 )
             if seller_display_price is not None:
-                seller_nl = ctx.offer_gen.generate_seller_counter(
+                seller_nl = ctx.seller_offer_gen.generate_seller_counter(
                     round_num=r_num,
                     price=seller_display_price,
                 )
@@ -690,6 +862,12 @@ class NegotiationExecutor:
                 )
                 previous_seller_price = seller_price
 
+            round_runtime = _combine_runtime_metrics(
+                ctx.buyer_offer_gen.model_mode,
+                ctx.buyer_offer_gen.runtime_metrics(),
+                ctx.seller_offer_gen.runtime_metrics(),
+            )
+
             neg_round = WireNegotiationRound(
                 round_number=r_num,
                 buyer_offer=buyer_offer,
@@ -698,7 +876,7 @@ class NegotiationExecutor:
                 nash_check=nash_status,
                 nash_price=nash_price,
                 nash_deviation_pct=nash_deviation_pct,
-                runtime=ctx.offer_gen.runtime_metrics(),
+                runtime=round_runtime,
             )
             rounds_data.append(neg_round)
             ctx.session["rounds"].append(neg_round)
@@ -709,12 +887,13 @@ class NegotiationExecutor:
                 except Exception:
                     logger.exception("Error in on_round callback")
 
-            await asyncio.sleep(0.1)
+            await asyncio.sleep(stream_delay)
 
         return _TranscriptEnrichmentOutcome(
             rounds=rounds_data,
             last_nash_result=last_nash_result,
-            offer_gen=ctx.offer_gen,
+            buyer_offer_gen=ctx.buyer_offer_gen,
+            seller_offer_gen=ctx.seller_offer_gen,
         )
 
     async def _emit_final_result(self, result: WireNegotiationResult, success: bool) -> None:
@@ -756,6 +935,46 @@ class NegotiationExecutor:
             "start_time": start_time,
         }
         self._negotiations[negotiation_id] = session
+
+        discovery_data: dict[str, Any] | None = None
+        verification_data: dict[str, Any] | None = None
+        if self._discovery_service is not None:
+            capability = self._discovery_capability or neg_config.scope
+            discovery = await self._discovery_service.discover_tool(
+                capability,
+                negotiation_id=negotiation_id,
+            )
+            discovery_data = self._metadata_to_dict(discovery)
+
+            if discovery_data.get("success", bool(discovery_data.get("service_id"))):
+                verification = await self._discovery_service.verify_discovered_agent(
+                    discovery,
+                    negotiation_id=negotiation_id,
+                )
+                verification_data = self._metadata_to_dict(verification)
+            elif self._enforce_verification:
+                verification_data = {
+                    "passed": False,
+                    "error": discovery_data.get("error", "discovery_failed"),
+                }
+
+            if self._enforce_verification and not (
+                verification_data and verification_data.get("passed")
+            ):
+                result = WireNegotiationResult(
+                    negotiation_id=negotiation_id,
+                    success=False,
+                    total_rounds=0,
+                    duration_seconds=round(time.time() - start_time, 3),
+                    objective_mode=objective_mode,
+                    passport_status=neg_config.passport_status,
+                    reason="verification_failed",
+                    discovery=discovery_data,
+                    verification=verification_data,
+                )
+                await self._emit_final_result(result, False)
+                return result
+
         self.state = NegotiationState.NEGOTIATING
 
         buyer_exp = _agent_exponent(buyer_config, objective_mode)
@@ -772,11 +991,9 @@ class NegotiationExecutor:
         )
 
         guardrail = NashGuardrail()
-        offer_gen = OfferGenerator(
-            model_mode=model_mode,
-            provider=neg_config.model_provider,
-            model=neg_config.model_name,
-            latency_budget_ms=neg_config.model_latency_budget_ms,
+        buyer_offer_gen, seller_offer_gen = self._build_offer_generators(
+            neg_config,
+            model_mode,
         )
 
         ctx = _TranscriptEnrichmentContext(
@@ -790,25 +1007,46 @@ class NegotiationExecutor:
             objective_mode=objective_mode,
             buyer_om=buyer_om,
             seller_om=seller_om,
-            offer_gen=offer_gen,
+            buyer_offer_gen=buyer_offer_gen,
+            seller_offer_gen=seller_offer_gen,
             guardrail=guardrail,
             core_config=core_config,
         )
         enriched = await self._enrich_and_broadcast_rounds(ctx)
         rounds_data = enriched.rounds
         last_nash_result = enriched.last_nash_result
-        offer_gen = enriched.offer_gen
+        buyer_offer_gen = enriched.buyer_offer_gen
+        seller_offer_gen = enriched.seller_offer_gen
 
         duration = time.time() - start_time
         success = core_result.agreed_price is not None
         agreed_price = (
             display_price(core_result.agreed_price) if core_result.agreed_price else 0.0
         )
-        deal_hash = (
-            compute_deal_hash(negotiation_id, agreed_price, len(rounds_data))
-            if success
-            else ""
-        )
+        buyer_id = buyer_config.agent_id or buyer_config.address or "buyer"
+        seller_id = seller_config.agent_id or seller_config.address or "seller"
+        deal_bound_at = int(time.time()) if success else 0
+        deal_hash = ""
+        if success:
+            if neg_config.deal_binding_mode == "canonical_eip712":
+                tmp_nr = CoreSessionResult(
+                    agreed_price=agreed_price,
+                    rounds=len(rounds_data),
+                    transcript=[],
+                    buyer_id=buyer_id,
+                    seller_id=seller_id,
+                    deal_bound_at=deal_bound_at,
+                )
+                deal_hash = compute_binding_deal_hash_hex_from_result(
+                    tmp_nr,
+                    bound_at=deal_bound_at,
+                    resource_uri=neg_config.resource_uri or "",
+                )
+            else:
+                digest = compute_binding_deal_hash_bytes(
+                    buyer_id, seller_id, agreed_price, deal_bound_at
+                )
+                deal_hash = binding_deal_hash_hex(digest)
 
         buyer_util = 0.0
         seller_util = 0.0
@@ -826,9 +1064,19 @@ class NegotiationExecutor:
         nash_price = round(last_nash_result.nash_price, 6) if last_nash_result else 0.0
         nash_deviation_pct = round(last_nash_result.deviation_pct, 4) if last_nash_result else 0.0
         buyer_surplus = max(0.0, buyer_config.reservation_price - agreed_price) if success else 0.0
-        seller_surplus = max(0.0, agreed_price - seller_config.reservation_price) if success else 0.0
+        seller_surplus = (
+            max(0.0, agreed_price - seller_config.reservation_price)
+            if success
+            else 0.0
+        )
         seller_discount = max(0.0, seller_config.initial_price - agreed_price) if success else 0.0
         buyer_movement = max(0.0, agreed_price - buyer_config.initial_price) if success else 0.0
+        model_runtime = _combine_runtime_metrics(
+            model_mode,
+            buyer_offer_gen.runtime_metrics(),
+            seller_offer_gen.runtime_metrics(),
+        )
+
         metrics = {
             "buyer_surplus": round(buyer_surplus, 6),
             "seller_surplus": round(seller_surplus, 6),
@@ -843,7 +1091,7 @@ class NegotiationExecutor:
             "buyer_tendency": _tendency_label(buyer_config),
             "seller_tendency": _tendency_label(seller_config),
             "passport_status": neg_config.passport_status,
-            "model_runtime": offer_gen.runtime_metrics(),
+            "model_runtime": model_runtime,
             "sandbox": _sandbox_posture(model_mode),
             "edge_case_status": _edge_case_status(
                 neg_config.max_rounds,
@@ -857,6 +1105,7 @@ class NegotiationExecutor:
             agreed_price=agreed_price,
             total_rounds=len(rounds_data),
             deal_hash=deal_hash,
+            deal_bound_at=deal_bound_at,
             buyer_utility=round(max(0, min(1, buyer_util)), 3),
             seller_utility=round(max(0, min(1, seller_util)), 3),
             duration_seconds=round(duration, 3),
@@ -865,6 +1114,8 @@ class NegotiationExecutor:
             objective_mode=objective_mode,
             passport_status=neg_config.passport_status,
             reason=reason,
+            discovery=discovery_data,
+            verification=verification_data,
         )
 
         await self._emit_final_result(result, success)

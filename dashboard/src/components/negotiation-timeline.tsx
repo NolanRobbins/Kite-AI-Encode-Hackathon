@@ -1,7 +1,7 @@
 "use client";
 
 import { motion } from "framer-motion";
-import type { ReasoningSummary } from "@/lib/types";
+import type { ModelRuntimeMetrics, ReasoningSummary } from "@/lib/types";
 
 interface TimelineProps {
   rounds: Array<{
@@ -16,10 +16,12 @@ interface TimelineProps {
     sellerReasoning?: ReasoningSummary;
     nashCheck?: string;
     nashDeviationPct?: number;
+    runtime?: ModelRuntimeMetrics;
   }>;
   visibleRounds: number;
   dealReached: boolean;
   finalPrice?: number;
+  negotiationId?: string;
   className?: string;
 }
 
@@ -43,60 +45,67 @@ export function NegotiationTimeline({
   visibleRounds,
   dealReached,
   finalPrice,
+  negotiationId,
   className = "",
 }: TimelineProps) {
+  const displayedRounds = rounds.slice(0, visibleRounds);
+
   return (
     <div className={`card-base p-5 ${className}`}>
-      <h3 className="text-sm font-semibold text-[var(--color-text)] mb-4">
-        Negotiation Timeline
-      </h3>
+      <h3 className="mb-4 text-sm font-semibold text-[var(--color-text)]">Negotiation Timeline</h3>
 
-      <div className="space-y-3 max-h-[420px] overflow-y-auto pr-2">
-        {rounds.slice(0, visibleRounds).map((round, i) => (
+      <div className="max-h-[420px] space-y-3 overflow-y-auto pr-2">
+        {displayedRounds.map((round, i) => (
           <motion.div
             key={round.round}
             initial={{ opacity: 0, y: 8 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ duration: 0.3, delay: i * 0.05 }}
           >
-            {/* Round label */}
-            <div className="flex items-center gap-2 mb-2">
-              <div className="text-[10px] font-mono text-[var(--color-text-faint)] uppercase tracking-widest">
+            <div className="mb-2 flex items-center gap-2">
+              <div className="text-[10px] font-mono uppercase tracking-widest text-[var(--color-text-faint)]">
                 Round {round.round}
               </div>
-                {round.nashCheck && (
-                  <span className={`text-[9px] font-mono px-1.5 py-0.5 rounded-full border ${
+              {round.nashCheck ? (
+                <span
+                  className={`rounded-full border px-1.5 py-0.5 text-[9px] font-mono ${
                     round.nashCheck === "PASS"
-                      ? "text-[var(--color-deal)] border-[var(--color-deal-dim)] bg-[var(--color-deal-bg)]"
-                      : "text-[var(--color-warning)] border-yellow-900 bg-yellow-950/30"
-                  }`}>
-                    {round.nashCheck}
-                    {typeof round.nashDeviationPct === "number"
-                      ? ` ${(round.nashDeviationPct * 100).toFixed(1)}%`
-                      : ""}
-                  </span>
-                )}
-              <div className="flex-1 h-px bg-[var(--color-border-subtle)]" />
+                      ? "border-[var(--color-deal-dim)] bg-[var(--color-deal-bg)] text-[var(--color-deal)]"
+                      : "border-yellow-900 bg-yellow-950/30 text-[var(--color-warning)]"
+                  }`}
+                >
+                  {round.nashCheck}
+                  {typeof round.nashDeviationPct === "number"
+                    ? ` ${(round.nashDeviationPct * 100).toFixed(1)}%`
+                    : ""}
+                </span>
+              ) : null}
+              {round.runtime ? (
+                <span className="text-[9px] font-mono text-[var(--color-text-faint)]">
+                  calls={round.runtime.model_calls ?? 0} | fallback=
+                  {round.runtime.fallback_messages ?? 0}
+                </span>
+              ) : null}
+              <div className="h-px flex-1 bg-[var(--color-border-subtle)]" />
             </div>
 
-            {/* Buyer bubble — left aligned */}
-            <div className="flex gap-2 mb-2">
-              <div className="w-6 h-6 rounded-full bg-[var(--color-buyer-bg)] border border-[var(--color-buyer-dim)] flex items-center justify-center flex-shrink-0 mt-0.5">
+            <div className="mb-2 flex gap-2">
+              <div className="mt-0.5 flex h-6 w-6 flex-shrink-0 items-center justify-center rounded-full border border-[var(--color-buyer-dim)] bg-[var(--color-buyer-bg)]">
                 <span className="text-[9px] font-bold text-[var(--color-buyer)]">B</span>
               </div>
-              <div className="flex-1 max-w-[85%]">
-                <div className="bg-[var(--color-buyer-bg)] border border-[rgba(59,130,246,0.15)] rounded-lg rounded-tl-sm px-3 py-2">
-                  <div className="flex items-center gap-2 mb-1">
+              <div className="max-w-[85%] flex-1">
+                <div className="rounded-lg rounded-tl-sm border border-[rgba(59,130,246,0.15)] bg-[var(--color-buyer-bg)] px-3 py-2">
+                  <div className="mb-1 flex items-center gap-2">
                     <span className="font-mono text-xs font-semibold text-[var(--color-buyer)]">
                       ${round.buyerPrice?.toFixed(4) ?? "----"}
                     </span>
-                    {round.buyerStance && (
+                    {round.buyerStance ? (
                       <span className="text-[9px] uppercase tracking-wider text-[var(--color-buyer)]">
                         {round.buyerStance}
                       </span>
-                    )}
+                    ) : null}
                   </div>
-                  <p className="text-xs text-[var(--color-text-muted)] leading-relaxed">
+                  <p className="text-xs leading-relaxed text-[var(--color-text-muted)]">
                     {round.buyerMessage}
                   </p>
                   <ReasoningMini reasoning={round.buyerReasoning} />
@@ -104,59 +113,64 @@ export function NegotiationTimeline({
               </div>
             </div>
 
-            {/* Seller bubble — right aligned */}
-            <div className="flex gap-2 justify-end">
-              <div className="flex-1 max-w-[85%] flex justify-end">
-                <div className="bg-[var(--color-seller-bg)] border border-[rgba(168,85,247,0.15)] rounded-lg rounded-tr-sm px-3 py-2">
-                  <div className="flex items-center gap-2 mb-1 justify-end">
-                    {round.sellerStance && (
+            <div className="flex justify-end gap-2">
+              <div className="flex max-w-[85%] flex-1 justify-end">
+                <div className="rounded-lg rounded-tr-sm border border-[rgba(168,85,247,0.15)] bg-[var(--color-seller-bg)] px-3 py-2">
+                  <div className="mb-1 flex items-center justify-end gap-2">
+                    {round.sellerStance ? (
                       <span className="text-[9px] uppercase tracking-wider text-[var(--color-seller)]">
                         {round.sellerStance}
                       </span>
-                    )}
+                    ) : null}
                     <span className="font-mono text-xs font-semibold text-[var(--color-seller)]">
                       ${round.sellerPrice?.toFixed(4) ?? "----"}
                     </span>
                   </div>
-                  <p className="text-xs text-[var(--color-text-muted)] leading-relaxed text-right">
+                  <p className="text-right text-xs leading-relaxed text-[var(--color-text-muted)]">
                     {round.sellerMessage}
                   </p>
                   <ReasoningMini reasoning={round.sellerReasoning} />
                 </div>
               </div>
-              <div className="w-6 h-6 rounded-full bg-[var(--color-seller-bg)] border border-[var(--color-seller-dim)] flex items-center justify-center flex-shrink-0 mt-0.5">
+              <div className="mt-0.5 flex h-6 w-6 flex-shrink-0 items-center justify-center rounded-full border border-[var(--color-seller-dim)] bg-[var(--color-seller-bg)]">
                 <span className="text-[9px] font-bold text-[var(--color-seller)]">S</span>
               </div>
             </div>
           </motion.div>
         ))}
 
-        {/* Deal agreement */}
-        {dealReached && (
+        {dealReached ? (
           <motion.div
             initial={{ opacity: 0, scale: 0.95 }}
             animate={{ opacity: 1, scale: 1 }}
             transition={{ duration: 0.5, ease: [0.16, 1, 0.3, 1] }}
             className="mt-4"
           >
-            <div className="bg-[var(--color-deal-bg)] border border-[var(--color-deal-dim)] rounded-lg p-4 text-center">
-              <div className="w-8 h-8 mx-auto mb-2 rounded-full bg-[var(--color-deal)] bg-opacity-20 flex items-center justify-center">
+            <div className="rounded-lg border border-[var(--color-deal-dim)] bg-[var(--color-deal-bg)] p-4 text-center">
+              <div className="mx-auto mb-2 flex h-8 w-8 items-center justify-center rounded-full bg-[var(--color-deal)] bg-opacity-20">
                 <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
-                  <path d="M3 8L6.5 11.5L13 5" stroke="#22c55e" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+                  <path
+                    d="M3 8L6.5 11.5L13 5"
+                    stroke="#22c55e"
+                    strokeWidth="2"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
                 </svg>
               </div>
-              <div className="text-xs font-semibold text-[var(--color-deal)] uppercase tracking-wider mb-1">
+              <div className="mb-1 text-xs font-semibold uppercase tracking-wider text-[var(--color-deal)]">
                 Deal Agreed
               </div>
               <div className="font-mono text-lg font-bold text-[var(--color-deal)]">
                 ${(finalPrice ?? 0).toFixed(4)} USDT
               </div>
-              <div className="text-[10px] text-[var(--color-text-faint)] mt-1">
-                Recorded on Kite AI • 6 rounds • Jan 18, 2025 14:32 UTC
+              <div className="mt-1 text-[10px] text-[var(--color-text-faint)]">
+                Recorded on Kite AI | {displayedRounds.length} rounds
+                {negotiationId ? ` | ${negotiationId}` : ""}
               </div>
             </div>
           </motion.div>
-        )}
+        ) : null}
       </div>
     </div>
   );

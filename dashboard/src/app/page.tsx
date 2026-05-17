@@ -28,7 +28,13 @@ import { PassportSessionFitCard } from "@/components/passport-session-fit-card";
 import { AgentIsolationPanel } from "@/components/agent-isolation-panel";
 import { fetchStats, startNegotiation as startNegotiationRequest } from "@/lib/api";
 import { useNegotiationStream } from "@/lib/use-negotiation-stream";
-import type { BargainingTendency, ModelMode, NegotiationControls, ObjectiveMode } from "@/lib/types";
+import type {
+  BargainingTendency,
+  ModelMode,
+  NegotiationControls,
+  ObjectiveMode,
+  PassportStatus,
+} from "@/lib/types";
 import {
   NEGOTIATION_ROUNDS,
   BUYER_AGENT,
@@ -39,7 +45,7 @@ import {
 const tendencyOptions: Array<{ value: BargainingTendency; label: string }> = [
   { value: "dominant", label: "Dominant" },
   { value: "balanced", label: "Balanced" },
-  { value: "cooperative", label: "Cooperative" },
+  { value: "submissive", label: "Submissive" },
 ];
 
 const objectiveOptions: Array<{ value: ObjectiveMode; label: string }> = [
@@ -56,12 +62,16 @@ const modelOptions: Array<{ value: ModelMode; label: string }> = [
   { value: "reasoning_llm", label: "Reasoning Advisor" },
 ];
 
-const procurementSteps = [
-  { label: "Discover", icon: Search },
-  { label: "Negotiate", icon: ArrowLeftRight },
-  { label: "Session Fit", icon: ShieldCheck },
-  { label: "Settle", icon: CreditCard },
-  { label: "Attest", icon: FileCheck2 },
+const procurementSteps: Array<{
+  label: string;
+  icon: typeof Search;
+  targetId: string;
+}> = [
+  { label: "Discover", icon: Search, targetId: "section-discover" },
+  { label: "Negotiate", icon: ArrowLeftRight, targetId: "section-negotiate" },
+  { label: "Session Fit", icon: ShieldCheck, targetId: "section-session-fit" },
+  { label: "Settle", icon: CreditCard, targetId: "section-settle" },
+  { label: "Attest", icon: FileCheck2, targetId: "section-attest" },
 ];
 
 function SelectPill<T extends string>({
@@ -91,14 +101,24 @@ function SelectPill<T extends string>({
 export default function DashboardPage() {
   const [isNegotiating, setIsNegotiating] = useState(false);
   const [stats, setStats] = useState(STATS);
+  const [passportStatus, setPassportStatus] = useState<PassportStatus>("stubbed");
   const [controls, setControls] = useState<NegotiationControls>({
     buyer: { gridEnabled: true, tendency: "balanced" },
     seller: { gridEnabled: true, tendency: "balanced" },
     objectiveMode: "fairness_guardrail",
-    modelMode: "policy_only",
+    modelMode: "llm",
   });
   const [startError, setStartError] = useState("");
-  const { connected, rounds, result, error, reset } = useNegotiationStream();
+  const {
+    connected,
+    rounds,
+    result,
+    error,
+    reset,
+    pipelineStages,
+    activeNegotiationId,
+    setActiveNegotiationId,
+  } = useNegotiationStream();
 
   useEffect(() => {
     fetchStats()
@@ -109,6 +129,7 @@ export default function DashboardPage() {
           totalVolume: apiStats.total_volume || STATS.totalVolume,
           avgRounds: apiStats.avg_rounds || STATS.avgRounds,
         });
+        setPassportStatus(apiStats.passport_status ?? "stubbed");
       })
       .catch(() => {
         // Keep the pre-seeded demo stats if the backend is not running yet.
@@ -116,8 +137,10 @@ export default function DashboardPage() {
   }, []);
 
   const hasLiveRounds = rounds.length > 0;
+  const showScriptedFallback =
+    !connected && !isNegotiating && !result && !hasLiveRounds;
   const chartRounds = useMemo(() => {
-    if (!hasLiveRounds) {
+    if (showScriptedFallback) {
       return NEGOTIATION_ROUNDS.map((round) => ({
         round: round.round,
         buyerPrice: round.buyerPrice,
@@ -141,15 +164,32 @@ export default function DashboardPage() {
       sellerReasoning: round.seller_reasoning,
       nashCheck: round.nash_check,
       nashDeviationPct: round.nash_deviation_pct,
+      runtime: round.runtime,
     }));
-  }, [hasLiveRounds, rounds]);
+  }, [rounds, showScriptedFallback]);
 
   const latestRound = rounds.at(-1);
-  const finalPrice = result?.agreed_price ?? (hasLiveRounds ? undefined : 0.1034);
-  const nashPrice = result?.metrics?.nash_price ?? latestRound?.nash_price ?? 0.1034;
-  const dealReached = Boolean(result?.success) || (!hasLiveRounds && !isNegotiating);
+  const buyerRuntime =
+    latestRound?.runtime?.buyer_runtime ??
+    result?.metrics?.model_runtime?.buyer_runtime;
+  const sellerRuntime =
+    latestRound?.runtime?.seller_runtime ??
+    result?.metrics?.model_runtime?.seller_runtime;
+  const finalPrice = result?.agreed_price ?? (showScriptedFallback ? 0.1034 : undefined);
+  const nashPrice = result?.metrics?.nash_price ?? latestRound?.nash_price ?? (showScriptedFallback ? 0.1034 : 0);
+  const dealReached = Boolean(result?.success) || showScriptedFallback;
   const visibleRounds = chartRounds.length;
-  const activeStep = dealReached ? 4 : hasLiveRounds ? 1 : 0;
+  const activeStep = dealReached ? 4 : hasLiveRounds ? 1 : isNegotiating ? 1 : 0;
+  const totalModelCalls =
+    (buyerRuntime?.model_calls ?? 0) + (sellerRuntime?.model_calls ?? 0);
+  const totalFallbackMessages =
+    (buyerRuntime?.fallback_messages ?? 0) + (sellerRuntime?.fallback_messages ?? 0);
+  const isTemplateFallbackInModelMode =
+    controls.modelMode !== "policy_only" &&
+    totalModelCalls === 0 &&
+    totalFallbackMessages > 0;
+  const buyerFallbackReason = buyerRuntime?.last_error ?? "";
+  const sellerFallbackReason = sellerRuntime?.last_error ?? "";
 
   const handleStartNegotiation = useCallback(() => {
     if (isNegotiating) return;
@@ -158,7 +198,8 @@ export default function DashboardPage() {
     reset();
 
     startNegotiationRequest(controls)
-      .then(() => {
+      .then((started) => {
+        setActiveNegotiationId(started.negotiation_id);
         setStats((prev) => ({
           ...prev,
           totalNegotiations: prev.totalNegotiations + 1,
@@ -168,7 +209,27 @@ export default function DashboardPage() {
         setStartError(err.message);
         setIsNegotiating(false);
       });
-  }, [controls, isNegotiating, reset]);
+  }, [controls, isNegotiating, reset, setActiveNegotiationId]);
+
+  const handleStartLiveNvda = useCallback(() => {
+    if (isNegotiating) return;
+    setStartError("");
+    setIsNegotiating(true);
+    reset();
+
+    startNegotiationRequest(controls, { liveNvda: true })
+      .then((started) => {
+        setActiveNegotiationId(started.negotiation_id);
+        setStats((prev) => ({
+          ...prev,
+          totalNegotiations: prev.totalNegotiations + 1,
+        }));
+      })
+      .catch((err: Error) => {
+        setStartError(err.message);
+        setIsNegotiating(false);
+      });
+  }, [controls, isNegotiating, reset, setActiveNegotiationId]);
 
   useEffect(() => {
     if (!result) return;
@@ -198,6 +259,13 @@ export default function DashboardPage() {
     }));
   };
 
+  const jumpToSection = useCallback((targetId: string) => {
+    if (typeof window === "undefined") return;
+    const node = document.getElementById(targetId);
+    if (!node) return;
+    node.scrollIntoView({ behavior: "smooth", block: "start" });
+  }, []);
+
   return (
     <div className="p-6 space-y-6 max-w-[1440px]">
       {/* Header */}
@@ -216,17 +284,56 @@ export default function DashboardPage() {
           <div className="mt-2 flex items-center gap-2 text-[10px] text-[var(--color-text-faint)]">
             <span className={`h-1.5 w-1.5 rounded-full ${connected ? "bg-[var(--color-deal)]" : "bg-[var(--color-warning)]"}`} />
             {connected ? "Backend stream connected" : "Backend stream offline"}
+            {activeNegotiationId ? (
+              <span className="font-mono">| run {activeNegotiationId}</span>
+            ) : null}
             <span>· Passport Session Fit uses live MCP when configured, otherwise a labeled mock</span>
+          </div>
+          <div className="mt-1 flex flex-wrap items-center gap-2 text-[10px] text-[var(--color-text-faint)]">
+            <span>
+              Buyer model:{" "}
+              <span className="font-mono text-[var(--color-buyer)]">
+                {buyerRuntime?.provider ?? "openai"} / {buyerRuntime?.model ?? "gpt-4o-mini"}
+              </span>
+            </span>
+            <span>·</span>
+            <span>
+              Seller model:{" "}
+              <span className="font-mono text-[var(--color-seller)]">
+                {sellerRuntime?.provider ?? "xai"} / {sellerRuntime?.model ?? "grok-4"}
+              </span>
+            </span>
           </div>
         </div>
 
-        {/* Start Negotiation CTA */}
-        <motion.button
-          whileHover={{ scale: 1.02 }}
-          whileTap={{ scale: 0.98 }}
-          onClick={handleStartNegotiation}
-          disabled={isNegotiating}
-          className={`
+        {/* Start negotiation — sandbox vs live NVDA (same server path as demo.py) */}
+        <div className="flex flex-col items-end gap-2 sm:flex-row">
+          <motion.button
+            whileHover={{ scale: 1.02 }}
+            whileTap={{ scale: 0.98 }}
+            onClick={handleStartLiveNvda}
+            disabled={isNegotiating}
+            className={`
+            flex items-center gap-2 px-4 py-2.5 rounded-lg font-medium text-sm border border-[var(--color-cyan-dim)]
+            transition-all duration-200
+            ${
+              isNegotiating
+                ? "bg-[#0b0d12] text-[var(--color-text-muted)] cursor-wait"
+                : "bg-[#0f1117] text-[var(--color-cyan)] hover:border-[var(--color-cyan)]"
+            }
+          `}
+            type="button"
+            title="Requires FastAPI :8000, surprise_api :8001, repo .env with Kite contracts + PRIVATE_KEY"
+          >
+            <Handshake size={16} />
+            {isNegotiating ? "Running…" : "Live NVDA + Kite"}
+          </motion.button>
+          <motion.button
+            whileHover={{ scale: 1.02 }}
+            whileTap={{ scale: 0.98 }}
+            onClick={handleStartNegotiation}
+            disabled={isNegotiating}
+            className={`
             flex items-center gap-2 px-5 py-2.5 rounded-lg font-medium text-sm
             transition-all duration-200
             ${
@@ -235,16 +342,53 @@ export default function DashboardPage() {
                 : "bg-[var(--color-cyan)] text-[#0f1117] hover:shadow-[0_0_20px_rgba(34,211,238,0.3)] glow-cyan"
             }
           `}
-          data-testid="button-start-negotiation"
-        >
-          <Zap size={16} />
-          {isNegotiating ? "Negotiating..." : "Start Negotiation"}
-        </motion.button>
+            data-testid="button-start-negotiation"
+            type="button"
+          >
+            <Zap size={16} />
+            {isNegotiating ? "Negotiating..." : "Start Negotiation"}
+          </motion.button>
+        </div>
       </div>
 
       {(error || startError) && (
         <div className="rounded-lg border border-yellow-900 bg-yellow-950/30 px-4 py-3 text-xs text-[var(--color-warning)]">
           {startError || error}
+        </div>
+      )}
+      {isTemplateFallbackInModelMode && (
+        <div className="rounded-lg border border-yellow-900 bg-yellow-950/30 px-4 py-3 text-xs text-[var(--color-warning)]">
+          Model fallback detected. This run is using template narration instead of live OpenAI/xAI outputs.
+          {(buyerFallbackReason || sellerFallbackReason) && (
+            <div className="mt-1 font-mono text-[10px] text-yellow-300">
+              buyer: {buyerFallbackReason || "unknown"} | seller: {sellerFallbackReason || "unknown"}
+            </div>
+          )}
+        </div>
+      )}
+
+      <div id="section-discover" />
+      {pipelineStages.length > 0 && (
+        <div className="card-base p-4">
+          <div className="mb-2 text-xs font-semibold uppercase tracking-wider text-[var(--color-cyan)]">
+            Live pipeline (same stages as demo.py)
+          </div>
+          <ol className="max-h-48 space-y-2 overflow-y-auto text-xs text-[var(--color-text-muted)]">
+            {pipelineStages.map((s, i) => (
+              <li
+                key={`${String(s.phase)}-${i}`}
+                className="border-l-2 border-[var(--color-cyan-dim)] pl-3"
+              >
+                <span className="font-mono text-[var(--color-text-faint)]">{String(s.phase)}</span>
+                {s.title ? (
+                  <span className="ml-2 font-medium text-[var(--color-text)]">{String(s.title)}</span>
+                ) : null}
+                {s.detail ? (
+                  <div className="mt-0.5 text-[var(--color-text-faint)]">{String(s.detail)}</div>
+                ) : null}
+              </li>
+            ))}
+          </ol>
         </div>
       )}
 
@@ -257,13 +401,22 @@ export default function DashboardPage() {
             return (
               <div
                 key={step.label}
+                role="button"
+                tabIndex={0}
+                onClick={() => jumpToSection(step.targetId)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" || event.key === " ") {
+                    event.preventDefault();
+                    jumpToSection(step.targetId);
+                  }
+                }}
                 className={`flex items-center gap-2 rounded-lg border px-3 py-2 ${
                   isCurrent
                     ? "border-[var(--color-cyan-dim)] bg-[var(--color-cyan-glow)] text-[var(--color-cyan)]"
                     : isDone
                     ? "border-[var(--color-deal-dim)] bg-[var(--color-deal-bg)] text-[var(--color-deal)]"
                     : "border-[var(--color-border-subtle)] bg-[#0b0d12] text-[var(--color-text-faint)]"
-                }`}
+                } cursor-pointer`}
               >
                 <Icon size={14} />
                 <span className="text-xs font-semibold">{step.label}</span>
@@ -274,7 +427,7 @@ export default function DashboardPage() {
       </div>
 
       {/* Hero barter view */}
-      <div className="grid grid-cols-[minmax(0,1fr)_380px] gap-4">
+      <div id="section-negotiate" className="grid grid-cols-[minmax(0,1fr)_380px] gap-4">
         <PriceConvergenceChart
           rounds={chartRounds}
           visibleRounds={visibleRounds}
@@ -289,13 +442,18 @@ export default function DashboardPage() {
             visibleRounds={visibleRounds}
             dealReached={dealReached}
             finalPrice={finalPrice}
+            negotiationId={result?.negotiation_id ?? activeNegotiationId ?? undefined}
           />
-          <PassportSessionFitCard
-            metrics={result?.metrics}
-            passportStatus={result?.passport_status ?? "stubbed"}
-            compact
-          />
-          <AgentIsolationPanel />
+          <div id="section-session-fit">
+            <PassportSessionFitCard
+              metrics={result?.metrics}
+              passportStatus={result?.passport_status ?? passportStatus}
+              compact
+            />
+          </div>
+          <div id="section-isolation">
+            <AgentIsolationPanel />
+          </div>
         </div>
       </div>
 
@@ -304,6 +462,9 @@ export default function DashboardPage() {
         <div className="mb-3 flex items-start justify-between gap-3">
           <div>
             <h2 className="text-sm font-semibold text-[var(--color-text)]">Demo Controls</h2>
+            <p className="mt-1 text-[10px] text-[var(--color-text-faint)]">
+              Buyer runtime targets OpenAI and seller runtime targets xAI in LLM modes.
+            </p>
             <p className="text-xs text-[var(--color-text-faint)]">
               Toggle each agent’s framework and bargaining posture, then compare the outcome against Nash.
             </p>
@@ -397,7 +558,7 @@ export default function DashboardPage() {
       <DecisionTracePanel latestRound={latestRound} connected={connected} />
       <DealMetricsPanel
         metrics={result?.metrics}
-        passportStatus={result?.passport_status ?? "stubbed"}
+        passportStatus={result?.passport_status ?? passportStatus}
       />
       <EdgeCasePanel
         edgeCaseStatus={result?.metrics?.edge_case_status}
@@ -411,6 +572,10 @@ export default function DashboardPage() {
           gridEnabled={controls.buyer.gridEnabled}
           tendency={controls.buyer.tendency}
           objectiveMode={controls.objectiveMode}
+          providerLabel={buyerRuntime?.provider ?? "openai"}
+          modelLabel={buyerRuntime?.model ?? "gpt-4o-mini"}
+          calls={buyerRuntime?.model_calls ?? 0}
+          fallbacks={buyerRuntime?.fallback_messages ?? 0}
           delay={0.1}
         />
         <AgentCard
@@ -418,14 +583,22 @@ export default function DashboardPage() {
           gridEnabled={controls.seller.gridEnabled}
           tendency={controls.seller.tendency}
           objectiveMode={controls.objectiveMode}
+          providerLabel={sellerRuntime?.provider ?? "xai"}
+          modelLabel={sellerRuntime?.model ?? "grok-4"}
+          calls={sellerRuntime?.model_calls ?? 0}
+          fallbacks={sellerRuntime?.fallback_messages ?? 0}
           delay={0.2}
         />
       </div>
 
       {/* Bottom row: Recent + Attestations */}
       <div id="deals" className="grid grid-cols-[1fr_1fr] gap-4">
-        <RecentActivity />
-        <AttestationFeed />
+        <div id="section-settle">
+          <RecentActivity />
+        </div>
+        <div id="section-attest">
+          <AttestationFeed />
+        </div>
       </div>
     </div>
   );

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Any
+from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -51,18 +51,25 @@ class OfferGenerator:
         model_mode: str = "policy_only",
         provider: str = "template",
         latency_budget_ms: int = 1200,
+        base_url: str = "",
     ) -> None:
         self.model_mode = model_mode
         self.provider = provider
         self.model = model
         self.max_tokens = max_tokens
         self.latency_budget_ms = latency_budget_ms
+        self.base_url = (base_url or "").strip()
+        self.api_configured = bool(api_key)
         self.call_count = 0
         self.total_latency_ms = 0.0
         self.fallback_count = 0
+        self.last_error = ""
         self._client: Any = None
         if api_key and _HAS_OPENAI and model_mode in {"llm", "reasoning_llm"}:
-            self._client = OpenAI(api_key=api_key)
+            kwargs: dict[str, Any] = {"api_key": api_key}
+            if self.base_url:
+                kwargs["base_url"] = self.base_url
+            self._client = OpenAI(**kwargs)
 
     # ------------------------------------------------------------------
     # Public helpers
@@ -131,6 +138,14 @@ class OfferGenerator:
 
     def _complete(self, user_prompt: str, fallback: str) -> str:
         if self._client is None:
+            if self.model_mode not in {"llm", "reasoning_llm"}:
+                self.last_error = f"mode_{self.model_mode}"
+            elif not self.api_configured:
+                self.last_error = "missing_api_key"
+            elif not _HAS_OPENAI:
+                self.last_error = "openai_sdk_missing"
+            else:
+                self.last_error = "client_uninitialized"
             self.fallback_count += 1
             return fallback
         started = time.perf_counter()
@@ -147,12 +162,15 @@ class OfferGenerator:
             elapsed_ms = (time.perf_counter() - started) * 1000.0
             self.call_count += 1
             self.total_latency_ms += elapsed_ms
+            self.last_error = ""
             text = resp.choices[0].message.content
             if text:
                 return text.strip()
+            self.last_error = "empty_model_response"
             self.fallback_count += 1
             return fallback
-        except Exception:
+        except Exception as exc:
+            self.last_error = f"{exc.__class__.__name__}: {str(exc)[:180]}"
             self.fallback_count += 1
             logger.warning("OpenAI call failed, using template fallback", exc_info=True)
             return fallback
@@ -163,9 +181,12 @@ class OfferGenerator:
         return {
             "model_mode": self.model_mode,
             "provider": self.provider,
+            "base_url": self.base_url,
+            "api_configured": self.api_configured,
             "model": self.model,
             "model_calls": self.call_count,
             "fallback_messages": self.fallback_count,
+            "last_error": self.last_error,
             "avg_model_latency_ms": round(avg_latency, 2),
             "total_model_latency_ms": round(self.total_latency_ms, 2),
             "latency_budget_ms": self.latency_budget_ms,

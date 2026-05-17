@@ -8,7 +8,7 @@ from typing import AsyncIterator
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 
 from negotiatorgrid.api.agent_card import AGENT_CARD
 from negotiatorgrid.api.act3_compare import router as act3_router
@@ -50,6 +50,30 @@ app.add_middleware(
 app.include_router(api_router)
 app.include_router(act3_router)
 app.include_router(ws_router)
+
+
+@app.get("/", include_in_schema=False)
+async def root() -> dict[str, object]:
+    """Browser-friendly index - this host is a JSON API, not a web page."""
+    return {
+        "service": "negotiatorgrid-api",
+        "message": "No HTML UI here - open /docs for Swagger, or use the dashboard.",
+        "links": {
+            "health": "/api/health",
+            "openapi": "/openapi.json",
+            "docs": "/docs",
+            "redoc": "/redoc",
+            "agent_card": "/.well-known/agent-card.json",
+            "negotiate": "POST /api/negotiate",
+            "websocket": "ws://127.0.0.1:8000/ws/negotiate",
+        },
+    }
+
+
+@app.get("/favicon.ico", include_in_schema=False)
+async def favicon() -> Response:
+    """Silence browser favicon requests (no asset bundled)."""
+    return Response(status_code=204)
 
 
 # Agent card discovery endpoint

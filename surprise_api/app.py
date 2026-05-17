@@ -259,6 +259,20 @@ def build_app(
 
     # -- Routes -----------------------------------------------------------
 
+    @app.get("/")
+    async def root() -> dict[str, Any]:
+        """Browser-friendly index — this service has no HTML shell."""
+        return {
+            "service": "surprise-api",
+            "message": "Use JSON endpoints below (GET / is not an HTML app).",
+            "try": {
+                "health": "/healthz",
+                "agent_card": "/.well-known/agent.json",
+                "nvda_x402": "/api/nvda",
+                "weather_x402": "/api/weather",
+            },
+        }
+
     @app.get("/healthz")
     async def healthz() -> dict[str, Any]:
         return {
@@ -334,6 +348,68 @@ def build_app(
     @app.get("/api/receipts")
     async def receipts() -> JSONResponse:
         return JSONResponse(content={"receipts": list(x402.receipts)})
+
+    # ------------------------------------------------------------------
+    # Demo-only admin surface: lets the NegotiatorGrid policy layer push
+    # a negotiated price + deal hash into the seller's PricingStore *and*
+    # into the ``extra`` block echoed in 402 responses. Without this hop,
+    # the buyer's pre-payment ``verify_payment_requirements`` correctly
+    # rejects the seller for advertising a stale list price — that IS the
+    # hash-mismatch hero shot. After the sync, the same buyer accepts and
+    # pays. Authentication is intentionally absent for demo simplicity
+    # (testnet only); do not expose this in production.
+    # ------------------------------------------------------------------
+    @app.post("/admin/sync-deal")
+    async def sync_deal(payload: dict[str, Any]) -> dict[str, Any]:
+        route = payload.get("route") or "/api/nvda"
+        price_atomic = int(payload.get("price_atomic") or 0)
+        deal_hash = str(payload.get("deal_hash") or "")
+        expected_buyer = str(payload.get("expected_buyer") or "")
+        if price_atomic <= 0:
+            return {"ok": False, "error": "price_atomic_required"}
+
+        pricing.set_price(route, price_atomic)
+
+        # Stash deal-binding hints so build_payment_requirements echoes them.
+        app.state.deal_bindings = getattr(app.state, "deal_bindings", {})
+        app.state.deal_bindings[route] = {
+            "deal_hash": deal_hash,
+            "expected_buyer": expected_buyer,
+        }
+
+        # Patch the middleware's PR builder ONCE so future 402s carry the
+        # negotiated extra fields. Repeated /admin/sync-deal calls update
+        # ``app.state.deal_bindings`` only — never re-wrap the builder.
+        if not getattr(x402, "_binding_patched", False):
+            original_builder = x402.build_payment_requirements
+
+            def _build_with_binding(r: str, atomic: int) -> dict[str, Any]:
+                requirements = original_builder(r, atomic)
+                binding = (app.state.deal_bindings or {}).get(r) or {}
+                if binding.get("deal_hash"):
+                    requirements.setdefault("extra", {})["deal_hash"] = binding["deal_hash"]
+                if binding.get("expected_buyer"):
+                    requirements["extra"]["expected_buyer"] = binding["expected_buyer"]
+                return requirements
+
+            x402.build_payment_requirements = _build_with_binding  # type: ignore[assignment]
+            x402._binding_patched = True  # type: ignore[attr-defined]
+
+        return {
+            "ok": True,
+            "route": route,
+            "price_atomic": price_atomic,
+            "deal_hash": deal_hash,
+            "expected_buyer": expected_buyer,
+        }
+
+    @app.post("/admin/reset")
+    async def reset_pricing() -> dict[str, Any]:
+        pricing.set_price("/api/weather", settings.default_weather_price_atomic)
+        pricing.set_price("/api/nvda", settings.default_nvda_price_atomic)
+        app.state.deal_bindings = {}
+        return {"ok": True, "weather": settings.default_weather_price_atomic,
+                "nvda": settings.default_nvda_price_atomic}
 
     if register_service and registry is not None:
         registry.register(SURPRISE_API_SERVICE_RECORD)

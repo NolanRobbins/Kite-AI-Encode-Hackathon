@@ -38,7 +38,7 @@ The Kite Portal is your dashboard for managing your wallet, viewing transactions
 Use your **invitation link** to access the Kite Portal (do not look for a sign-up page, follow the invitation link you received):
 
 ```
-https://x402-portal-eight.vercel.app/
+https://agentpassport.ai/dashboard
 ```
 
 ### Set Up Your Account

@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from eth_account import Account
 from web3 import Web3
 
 from negotiatorgrid.core.types import DealAttestation, SLATerms
@@ -30,9 +31,9 @@ DEAL_RECORD_ABI: list[dict[str, Any]] = [
                     {"internalType": "uint8", "name": "negotiationRounds", "type": "uint8"},
                     {
                         "components": [
-                            {"internalType": "uint32", "name": "responseTimeMs", "type": "uint32"},
-                            {"internalType": "uint16", "name": "availabilityBps", "type": "uint16"},
-                            {"internalType": "uint32", "name": "validityPeriodSecs", "type": "uint32"},
+                            {"internalType": "uint64", "name": "responseTimeMs", "type": "uint64"},
+                            {"internalType": "uint64", "name": "availabilityBps", "type": "uint64"},
+                            {"internalType": "uint64", "name": "validityPeriodSecs", "type": "uint64"},
                         ],
                         "internalType": "struct SLATerms",
                         "name": "sla",
@@ -48,7 +49,7 @@ DEAL_RECORD_ABI: list[dict[str, Any]] = [
             }
         ],
         "name": "recordDeal",
-        "outputs": [],
+        "outputs": [{"internalType": "bytes32", "name": "dealHash", "type": "bytes32"}],
         "stateMutability": "nonpayable",
         "type": "function",
     },
@@ -92,9 +93,9 @@ DEAL_RECORD_ABI: list[dict[str, Any]] = [
                     {"internalType": "uint8", "name": "negotiationRounds", "type": "uint8"},
                     {
                         "components": [
-                            {"internalType": "uint32", "name": "responseTimeMs", "type": "uint32"},
-                            {"internalType": "uint16", "name": "availabilityBps", "type": "uint16"},
-                            {"internalType": "uint32", "name": "validityPeriodSecs", "type": "uint32"},
+                            {"internalType": "uint64", "name": "responseTimeMs", "type": "uint64"},
+                            {"internalType": "uint64", "name": "availabilityBps", "type": "uint64"},
+                            {"internalType": "uint64", "name": "validityPeriodSecs", "type": "uint64"},
                         ],
                         "internalType": "struct SLATerms",
                         "name": "sla",
@@ -223,9 +224,10 @@ class DealRecordClient:
             return fake_hash
 
         try:
+            sender = Account.from_key(self._private_key).address
             tx = self._contract.functions.recordDeal(
                 _attestation_to_tuple(attestation)
-            ).build_transaction({"chainId": self._w3.eth.chain_id})
+            ).build_transaction({"chainId": self._w3.eth.chain_id, "from": sender})
             return await send_transaction(self._w3, tx, self._private_key)
         except Exception:
             logger.exception("recordDeal failed")
@@ -242,9 +244,10 @@ class DealRecordClient:
             return fake_hash
 
         try:
+            sender = Account.from_key(self._private_key).address
             tx = self._contract.functions.settleDeal(
                 deal_hash, x402_tx_hash
-            ).build_transaction({"chainId": self._w3.eth.chain_id})
+            ).build_transaction({"chainId": self._w3.eth.chain_id, "from": sender})
             return await send_transaction(self._w3, tx, self._private_key)
         except Exception:
             logger.exception("settleDeal failed")
@@ -269,9 +272,10 @@ class DealRecordClient:
             return Web3.keccak(deal_hash).hex()
 
         try:
+            sender = Account.from_key(self._private_key).address
             tx = self._contract.functions.updateReputation(
                 deal_hash, buyer_score, seller_score, tag
-            ).build_transaction({"chainId": self._w3.eth.chain_id})
+            ).build_transaction({"chainId": self._w3.eth.chain_id, "from": sender})
             return await send_transaction(self._w3, tx, self._private_key)
         except Exception:
             logger.exception("updateReputation failed")

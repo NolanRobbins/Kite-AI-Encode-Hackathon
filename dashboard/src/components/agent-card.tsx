@@ -10,6 +10,10 @@ interface AgentCardProps {
   gridEnabled?: boolean;
   tendency?: string;
   objectiveMode?: string;
+  providerLabel?: string;
+  modelLabel?: string;
+  calls?: number;
+  fallbacks?: number;
   delay?: number;
 }
 
@@ -18,6 +22,10 @@ export function AgentCard({
   gridEnabled = true,
   tendency = "balanced",
   objectiveMode = "fairness_guardrail",
+  providerLabel = "template",
+  modelLabel = "template",
+  calls = 0,
+  fallbacks = 0,
   delay = 0,
 }: AgentCardProps) {
   const [copied, setCopied] = useState(false);
@@ -138,6 +146,17 @@ export function AgentCard({
           </div>
           <div className="mt-1 text-[10px] text-[var(--color-text-faint)]">
             Objective: {objectiveMode.replaceAll("_", " ")}
+          </div>
+        </div>
+        <div className="col-span-2 rounded-lg border border-[var(--color-border-subtle)] bg-[#0b0d12] px-2.5 py-2">
+          <div className="text-[10px] uppercase tracking-wider text-[var(--color-text-faint)]">
+            Runtime
+          </div>
+          <div className="mt-1 text-[11px] font-mono text-[var(--color-text-muted)]">
+            {providerLabel} / {modelLabel}
+          </div>
+          <div className="mt-1 text-[10px] text-[var(--color-text-faint)]">
+            calls={calls} | fallbacks={fallbacks}
           </div>
         </div>
       </div>

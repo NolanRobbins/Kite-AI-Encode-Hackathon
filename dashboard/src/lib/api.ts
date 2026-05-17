@@ -9,7 +9,7 @@ const DEFAULT_TIMEOUT_MS = 10_000;
 
 const tendencyToStrategy = (tendency: string) => {
   if (tendency === "dominant") return "boulware";
-  if (tendency === "cooperative") return "conceder";
+  if (tendency === "cooperative" || tendency === "submissive") return "conceder";
   return "linear";
 };
 
@@ -102,6 +102,18 @@ export interface Act3CompareStatus {
   savings_pct: number;
 }
 
+export interface NegotiationTraceRecord {
+  schema_version: number;
+  negotiation_id: string;
+  updated_at: number;
+  status: string;
+  trace_path: string;
+  request: Record<string, unknown>;
+  result?: Record<string, unknown>;
+  deal?: Record<string, unknown>;
+  events: Array<Record<string, unknown>>;
+}
+
 export class ApiError extends Error {
   constructor(
     message: string,
@@ -175,55 +187,95 @@ export const api = {
       `/api/act3/compare/${encodeURIComponent(highId)}/${encodeURIComponent(lowId)}`,
       { signal },
     ),
+  listTraces: (signal?: AbortSignal) => request<Array<Record<string, unknown>>>("/api/traces", { signal }),
+  getTrace: (negotiationId: string, signal?: AbortSignal) =>
+    request<NegotiationTraceRecord>(
+      `/api/negotiations/${encodeURIComponent(negotiationId)}/trace`,
+      { signal },
+    ),
 } as const;
 
-export async function startNegotiation(controls: NegotiationControls) {
+export async function startNegotiation(
+  controls: NegotiationControls,
+  opts?: { liveNvda?: boolean },
+) {
+  const liveNvda = Boolean(opts?.liveNvda);
   const response = await fetch(`${API_BASE}/api/negotiate`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      buyer_config: {
-        agent_id: "agent-buyer-alpha",
-        address: "0x742d35Cc6634C0532925a3b844Bc9e7595bD18",
-        role: "buyer",
-        initial_price: 0.08,
-        reservation_price: 0.12,
-        strategy: tendencyToStrategy(controls.buyer.tendency),
-        grid_enabled: controls.buyer.gridEnabled,
-        tendency: controls.buyer.tendency,
-        reputation_score: 84,
-      },
-      seller_config: {
-        agent_id: "agent-weatherpro",
-        address: "0x2096c34E1F3B4aA7C5f8dE90b6cA42Ef1d2cE",
-        role: "seller",
-        initial_price: 0.13,
-        reservation_price: 0.09,
-        strategy: tendencyToStrategy(controls.seller.tendency),
-        grid_enabled: controls.seller.gridEnabled,
-        tendency: controls.seller.tendency,
-        reputation_score: 78,
-      },
-      negotiation_params: {
-        max_rounds: 7,
-        timeout_seconds: 30,
-        resource_uri: "/api/weather-pro",
-        scope: "weather-data",
-        objective_mode: controls.objectiveMode,
-        passport_status: "stubbed",
-        model_mode: controls.modelMode,
-        model_provider: controls.modelMode === "policy_only" ? "template" : "openai-compatible",
-        model_name:
-          controls.modelMode === "reasoning_llm"
-            ? "reasoning-advisor"
-            : controls.modelMode === "llm"
-            ? "gpt-4o-mini"
-            : controls.modelMode === "slm"
-            ? "local-small-narrator"
-            : "template",
-        model_latency_budget_ms: controls.modelMode === "reasoning_llm" ? 5000 : 1200,
-      },
-    }),
+    body: JSON.stringify(
+      liveNvda
+        ? {
+            buyer_config: { agent_id: "server-buyer", address: "0x0000000000000000000000000000000000000000", role: "buyer" },
+            seller_config: { agent_id: "server-seller", address: "0x0000000000000000000000000000000000000000", role: "seller" },
+            negotiation_params: {
+              max_rounds: 7,
+              timeout_seconds: 30,
+              resource_uri: "/api/nvda",
+              scope: "nvda-market-data",
+              objective_mode: controls.objectiveMode,
+              passport_status: "stubbed",
+              model_mode: controls.modelMode,
+              model_provider:
+                controls.modelMode === "policy_only" ? "template" : "openai-compatible",
+              model_name:
+                controls.modelMode === "reasoning_llm"
+                  ? "reasoning-advisor"
+                  : controls.modelMode === "llm"
+                    ? "gpt-4o-mini"
+                    : controls.modelMode === "slm"
+                      ? "local-small-narrator"
+                      : "template",
+              model_latency_budget_ms: controls.modelMode === "reasoning_llm" ? 5000 : 1200,
+              scenario: "nvda_surprise_live",
+              deal_binding_mode: "canonical_eip712",
+            },
+          }
+        : {
+            buyer_config: {
+              agent_id: "agent-buyer-alpha",
+              address: "0x742d35Cc6634C0532925a3b844Bc9e7595bD18",
+              role: "buyer",
+              initial_price: 0.08,
+              reservation_price: 0.12,
+              strategy: tendencyToStrategy(controls.buyer.tendency),
+              grid_enabled: controls.buyer.gridEnabled,
+              tendency: controls.buyer.tendency,
+              reputation_score: 84,
+            },
+            seller_config: {
+              agent_id: "agent-weatherpro",
+              address: "0x2096c34E1F3B4aA7C5f8dE90b6cA42Ef1d2cE",
+              role: "seller",
+              initial_price: 0.13,
+              reservation_price: 0.09,
+              strategy: tendencyToStrategy(controls.seller.tendency),
+              grid_enabled: controls.seller.gridEnabled,
+              tendency: controls.seller.tendency,
+              reputation_score: 78,
+            },
+            negotiation_params: {
+              max_rounds: 7,
+              timeout_seconds: 30,
+              resource_uri: "/api/weather-pro",
+              scope: "weather-data",
+              objective_mode: controls.objectiveMode,
+              passport_status: "stubbed",
+              model_mode: controls.modelMode,
+              model_provider:
+                controls.modelMode === "policy_only" ? "template" : "openai-compatible",
+              model_name:
+                controls.modelMode === "reasoning_llm"
+                  ? "reasoning-advisor"
+                  : controls.modelMode === "llm"
+                    ? "gpt-4o-mini"
+                    : controls.modelMode === "slm"
+                      ? "local-small-narrator"
+                      : "template",
+              model_latency_budget_ms: controls.modelMode === "reasoning_llm" ? 5000 : 1200,
+            },
+          },
+    ),
   });
 
   if (!response.ok) {

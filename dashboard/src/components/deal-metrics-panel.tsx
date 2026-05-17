@@ -112,6 +112,22 @@ export function DealMetricsPanel({
       <div className="mt-2 text-[10px] text-[var(--color-text-faint)]">
         {metrics?.model_runtime?.runtime_note ?? "Policy-only mode keeps the demo deterministic and fast."}
       </div>
+      <div className="mt-2 grid grid-cols-2 gap-3 text-[10px]">
+        <div className="rounded-lg border border-[var(--color-border-subtle)] bg-[#0f1117] p-2.5">
+          <div className="uppercase tracking-wider text-[var(--color-text-faint)]">Buyer Runtime</div>
+          <div className="mt-1 font-mono text-[var(--color-buyer)]">
+            {metrics?.model_runtime?.buyer_runtime?.provider ?? "template"} /{" "}
+            {metrics?.model_runtime?.buyer_runtime?.model ?? "template"}
+          </div>
+        </div>
+        <div className="rounded-lg border border-[var(--color-border-subtle)] bg-[#0f1117] p-2.5">
+          <div className="uppercase tracking-wider text-[var(--color-text-faint)]">Seller Runtime</div>
+          <div className="mt-1 font-mono text-[var(--color-seller)]">
+            {metrics?.model_runtime?.seller_runtime?.provider ?? "template"} /{" "}
+            {metrics?.model_runtime?.seller_runtime?.model ?? "template"}
+          </div>
+        </div>
+      </div>
     </div>
   );
 }

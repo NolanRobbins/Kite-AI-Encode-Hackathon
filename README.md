@@ -319,6 +319,9 @@ cp .env.example .env
 | `KITE_TEST_USDT_ADDR` | Test USDT token address | `0x0fF5393387ad2f9f691FD6Fd28e07E3969e27e63` |
 | `OPENAI_API_KEY` | OpenAI API key for LLM offer generation | — |
 | `OPENAI_MODEL` | LLM model for natural language offers | `gpt-4o-mini` |
+| `XAI_API_KEY` | xAI API key for seller-side narration | `—` |
+| `XAI_MODEL` | xAI model id (OpenAI-compatible API) | `grok-4` |
+| `XAI_BASE_URL` | xAI OpenAI-compatible base URL | `https://api.x.ai/v1` |
 | `KITE_MCP_ENDPOINT` | Kite MCP server endpoint | `https://neo.dev.gokite.ai/v1/mcp` |
 | `KITE_MCP_AUTH_TOKEN` | Optional Passport MCP auth token for live mode | — |
 | `KITE_PASSPORT_MODE` | `mock` or `live`; controls Passport integration labeling | `mock` |
@@ -326,6 +329,22 @@ cp .env.example .env
 | `KITE_PASSPORT_SESSION_ID` | Optional active Passport Session ID for live demo checks | — |
 | `API_HOST` | API server bind address | `0.0.0.0` |
 | `API_PORT` | API server port | `8000` |
+
+Passport mode behavior:
+
+- `KITE_PASSPORT_MODE=mock` -> result/status shows `stubbed` and discovery stays local/mock.
+- `KITE_PASSPORT_MODE=live` + missing `KITE_MCP_AUTH_TOKEN` -> status shows `disabled`.
+- `KITE_PASSPORT_MODE=live` + token present -> status shows `ready` and discovery attempts live MCP first.
+
+Runtime posture endpoint: `GET /api/passport/status`.
+
+Private live-mode setup guide: [`docs/passport-quickstart-private.md`](docs/passport-quickstart-private.md).
+
+Negotiation trace export:
+
+- Every run auto-saves JSON under `logs/negotiation_traces/<negotiation_id>.json`.
+- List traces: `GET /api/traces`
+- Fetch one trace: `GET /api/negotiations/{negotiation_id}/trace`
 
 ---
 

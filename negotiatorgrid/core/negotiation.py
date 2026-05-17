@@ -381,8 +381,10 @@ class NegotiationSession:
             agreed_price = cfg.price_min + state.agreement[0]
 
         deal_hash = ""
+        deal_bound_at = 0
         if agreed_price is not None:
-            raw = f"buyer:seller:{agreed_price}:{state.step}:{start}"
+            deal_bound_at = int(time.time())
+            raw = f"buyer:seller:{agreed_price}:{state.step}:{deal_bound_at}"
             deal_hash = hashlib.sha256(raw.encode()).hexdigest()[:16]
 
         return NegotiationResult(
@@ -393,4 +395,5 @@ class NegotiationSession:
             seller_id="seller",
             duration_ms=elapsed_ms,
             deal_hash=deal_hash,
+            deal_bound_at=deal_bound_at,
         )

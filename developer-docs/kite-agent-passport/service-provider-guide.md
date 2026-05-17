@@ -283,7 +283,7 @@ For detailed implementation guidance on the x402 protocol, refer to:
 
 To test your x402 service with Kite Agent Passport:
 
-1. Set up a test user account in the [Kite Portal](https://x402-portal-eight.vercel.app/)
+1. Set up a test user account in the [Kite Portal](https://agentpassport.ai/dashboard)
 2. Fund the test account with testnet tokens from the [faucet](https://faucet.gokite.ai/)
 3. Create a test agent and configure MCP in an AI client (e.g., Claude Desktop)
 4. Have the AI client call your service

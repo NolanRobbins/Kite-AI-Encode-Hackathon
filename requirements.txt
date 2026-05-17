@@ -1,6 +1,8 @@
 # Runtime dependencies for container builds (surprise_api + backend).
 # Full dev/test deps live in pyproject.toml [project.optional-dependencies].
 # Keep in sync with pyproject.toml [project] dependencies.
+# Pydantic / FastAPI need a recent build (``TypeIs`` lives here; Conda base is often too old).
+typing_extensions>=4.12.0
 fastapi>=0.115.0
 uvicorn[standard]>=0.30.0
 websockets>=13.0

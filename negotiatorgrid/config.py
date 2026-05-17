@@ -53,6 +53,9 @@ class LLMConfig:
 
     api_key: str = os.getenv("OPENAI_API_KEY", "")
     model: str = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+    xai_api_key: str = os.getenv("XAI_API_KEY", "")
+    xai_model: str = os.getenv("XAI_MODEL", "grok-4")
+    xai_base_url: str = os.getenv("XAI_BASE_URL", "https://api.x.ai/v1")
     max_tokens: int = 256
     temperature: float = 0.7
 
@@ -74,6 +77,16 @@ class MCPConfig:
     """MCP server configuration."""
 
     endpoint: str = os.getenv("KITE_MCP_ENDPOINT", "https://neo.dev.gokite.ai/v1/mcp")
+    auth_token: str = os.getenv("KITE_MCP_AUTH_TOKEN", "")
+
+
+@dataclass(frozen=True)
+class PassportConfig:
+    """Kite Agent Passport runtime configuration."""
+
+    mode: str = os.getenv("KITE_PASSPORT_MODE", "mock")
+    agent_id: str = os.getenv("KITE_PASSPORT_AGENT_ID", "")
+    session_id: str = os.getenv("KITE_PASSPORT_SESSION_ID", "")
 
 
 @dataclass(frozen=True)
@@ -94,6 +107,7 @@ class AppConfig:
     llm: LLMConfig = field(default_factory=LLMConfig)
     negotiation: NegotiationConfig = field(default_factory=NegotiationConfig)
     mcp: MCPConfig = field(default_factory=MCPConfig)
+    passport: PassportConfig = field(default_factory=PassportConfig)
     server: ServerConfig = field(default_factory=ServerConfig)
 
 

@@ -291,7 +291,7 @@ async function callX402Service(serviceUrl, requestData) {
 ## Next Steps
 
 1. Review the [MCP Protocol specification](https://modelcontextprotocol.io/)
-2. Set up a test agent in the [Kite Portal](https://x402-portal-eight.vercel.app/)
+2. Set up a test agent in the [Kite Portal](https://agentpassport.ai/dashboard)
 3. Test the MCP connection and payment flow
 4. Review [Service Provider Guide](service-provider-guide.md) to understand the other side
 
@@ -299,7 +299,7 @@ async function callX402Service(serviceUrl, requestData) {
 
 ## Additional Resources
 
-- **Kite Portal:** https://x402-portal-eight.vercel.app/
+- **Kite Portal:** https://agentpassport.ai/dashboard
 - **MCP Protocol:** https://modelcontextprotocol.io/
 - **x402 Demo Facilitators:** https://github.com/gokite-ai/x402
 - **Testnet Notice:** [testnet-notice.md](testnet-notice.md)

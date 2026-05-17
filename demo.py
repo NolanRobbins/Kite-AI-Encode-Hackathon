@@ -1,42 +1,84 @@
 #!/usr/bin/env python3
-"""
-NegotiatorGrid — Golden Path Demo Script
-==========================================
+"""NegotiatorGrid — end-to-end demo on live Kite Testnet (Chain 2368).
 
-Demonstrates the full pipeline using REAL NegotiatorGrid modules:
-  1. Agent registration  (IdentityClient — ERC-8004)
-  2. Reputation lookup    (ReputationFeed — on-chain)
-  3. Bilateral negotiation (NegotiationSession — NegMAS SAOMechanism)
-  4. x402 settlement       (X402Settler — mock facilitator)
-  5. On-chain attestation  (AttestationPipeline — DealRecord)
-  6. Summary stats
+Three acts:
 
-Run:  python demo.py
+* **Act 1 — Without NegotiatorGrid.** A naive buyer hits the Surprise
+  API directly, gets a 402 with the list price, and pays it. One round
+  trip. No negotiation. No attestation.
+* **Act 2 — With NegotiatorGrid (happy path).** MCP-style discovery,
+  ERC-8004 identity check, on-chain reputation lookup, 7-round NegMAS
+  SAOP negotiation, **hash-mismatch rejection** of the stale 402,
+  policy-driven re-sync, real x402 settlement against the Surprise
+  API, and a real ``DealRecord`` write on Kite Testnet.
+* **Act 3 — Reputation-conditioned strategy.** A second seller is
+  registered on ``IdentityRegistry``, given a piece of negative
+  feedback on ``ReputationRegistry``, and the same buyer re-runs the
+  bargain. The Boulware → Conceder shift in the buyer's aspiration
+  curve is what makes the second negotiation finish in fewer rounds
+  at a worse-for-the-seller price.
+
+Pre-flight:
+
+* ``contracts/scripts/write_env_files.js`` must have produced the
+  repo-root ``.env`` with deployed contract addresses + a funded
+  ``PRIVATE_KEY``.
+* The Surprise API must be running on ``http://localhost:8001``::
+
+      uv pip install -r requirements.txt    # one-time
+      .venv-demo\\Scripts\\python -m uvicorn surprise_api.app:app --port 8001
+
+* On Windows, the demo sets ``PYTHONIOENCODING=utf-8`` for box-drawing
+  characters; or just run with ``$env:PYTHONIOENCODING="utf-8"``.
+
+Run::
+
+    .venv-demo\\Scripts\\python demo.py
 """
 
 from __future__ import annotations
 
 import asyncio
+import os
 import sys
 import time
 from dataclasses import dataclass, field
 from typing import Any
 
-# ── Real NegotiatorGrid imports ──────────────────────────────────────────────
-from negotiatorgrid.core.negotiation import NegotiationSession
-from negotiatorgrid.core.opponent_model import OpponentModeler
-from negotiatorgrid.core.nash_guardrail import NashGuardrail
-from negotiatorgrid.core.types import NegotiationConfig, NegotiationOffer
-from negotiatorgrid.core.settlement import X402Settler
-from negotiatorgrid.core.attestation import AttestationPipeline
-from negotiatorgrid.core.reputation import ReputationFeed
+import httpx
+from eth_account import Account
+from web3 import Web3
+from web3.middleware import ExtraDataToPOAMiddleware
+
+# Force utf-8 stdout on Windows so box-drawing characters render.
+try:
+    sys.stdout.reconfigure(encoding="utf-8")  # type: ignore[attr-defined]
+except Exception:
+    pass
+
+from negotiatorgrid.config import config
 from negotiatorgrid.contracts.deal_record import DealRecordClient
 from negotiatorgrid.contracts.identity import IdentityClient
 from negotiatorgrid.contracts.reputation_client import ReputationClient
-from negotiatorgrid.llm.offer_generator import OfferGenerator
+from negotiatorgrid.core.attestation import AttestationPipeline
+from negotiatorgrid.core.deal_hash import (
+    compute_binding_deal_hash_bytes_from_result,
+    compute_binding_deal_hash_hex_from_result,
+)
+from negotiatorgrid.core.negotiation import NegotiationSession
+from negotiatorgrid.core.nash_guardrail import NashGuardrail
+from negotiatorgrid.core.opponent_model import OpponentModeler
+from negotiatorgrid.core.reputation import ReputationFeed
+from negotiatorgrid.core.settlement import DealHashMismatchError, X402Settler
+from negotiatorgrid.core.types import NegotiationConfig
+from negotiatorgrid.core.x402_eip712 import (
+    DEFAULT_MAX_TIMEOUT_SECONDS,
+    X402_JSON_VERSION,
+    build_transfer_with_authorization_typed_data,
+)
 
 # ---------------------------------------------------------------------------
-# ANSI colour helpers (no external deps)
+# Terminal styling
 # ---------------------------------------------------------------------------
 
 BOLD = "\033[1m"
@@ -55,32 +97,36 @@ BG_GREEN = "\033[42m"
 BG_RED = "\033[41m"
 BG_YELLOW = "\033[43m"
 
-BAR = f"{DIM}{'─' * 68}{RESET}"
-DBAR = f"{DIM}{'═' * 68}{RESET}"
+BAR = f"{DIM}{'─' * 72}{RESET}"
+DBAR = f"{DIM}{'═' * 72}{RESET}"
+
+SURPRISE_API_BASE = os.getenv("SURPRISE_API_URL", "http://localhost:8001")
+NVDA_ROUTE = "/api/nvda"
+NVDA_LIST_PRICE_ATOMIC = 30_000   # $0.030 advertised by surprise_api
+USDT_DECIMALS = 1_000_000
 
 
 def banner() -> None:
     print(f"""
 {BOLD}{CYAN}
-  ╔══════════════════════════════════════════════════════════════╗
-  ║                                                              ║
-  ║        ███╗   ██╗███████╗ ██████╗  ██████╗ ████████╗        ║
-  ║        ████╗  ██║██╔════╝██╔════╝ ██╔═══██╗╚══██╔══╝        ║
-  ║        ██╔██╗ ██║█████╗  ██║  ███╗██║   ██║   ██║           ║
-  ║        ██║╚██╗██║██╔══╝  ██║   ██║██║   ██║   ██║           ║
-  ║        ██║ ╚████║███████╗╚██████╔╝╚██████╔╝   ██║           ║
-  ║        ╚═╝  ╚═══╝╚══════╝ ╚═════╝  ╚═════╝    ╚═╝           ║
-  ║                                                              ║
-  ║           ██████╗ ██████╗ ██╗██████╗                         ║
-  ║          ██╔════╝ ██╔══██╗██║██╔══██╗                        ║
-  ║          ██║  ███╗██████╔╝██║██║  ██║                        ║
-  ║          ██║   ██║██╔══██╗██║██║  ██║                        ║
-  ║          ╚██████╔╝██║  ██║██║██████╔╝                        ║
-  ║           ╚═════╝ ╚═╝  ╚═╝╚═╝╚═════╝                        ║
-  ║                                                              ║
-  ║  Agent-to-Agent Price Negotiation on Kite AI                 ║
-  ║  x402 Settlement  ·  On-Chain Attestation  ·  Game Theory    ║
-  ╚══════════════════════════════════════════════════════════════╝{RESET}
+  ╔══════════════════════════════════════════════════════════════════════╗
+  ║                                                                      ║
+  ║   ███╗   ██╗███████╗ ██████╗  ██████╗ ████████╗██╗ █████╗ ████████╗ ║
+  ║   ████╗  ██║██╔════╝██╔════╝ ██╔═══██╗╚══██╔══╝██║██╔══██╗╚══██╔══╝ ║
+  ║   ██╔██╗ ██║█████╗  ██║  ███╗██║   ██║   ██║   ██║███████║   ██║    ║
+  ║   ██║╚██╗██║██╔══╝  ██║   ██║██║   ██║   ██║   ██║██╔══██║   ██║    ║
+  ║   ██║ ╚████║███████╗╚██████╔╝╚██████╔╝   ██║   ██║██║  ██║   ██║    ║
+  ║   ╚═╝  ╚═══╝╚══════╝ ╚═════╝  ╚═════╝    ╚═╝   ╚═╝╚═╝  ╚═╝   ╚═╝    ║
+  ║                              ██████╗ ██████╗ ██╗██████╗             ║
+  ║                             ██╔════╝ ██╔══██╗██║██╔══██╗            ║
+  ║                             ██║  ███╗██████╔╝██║██║  ██║            ║
+  ║                             ██║   ██║██╔══██╗██║██║  ██║            ║
+  ║                             ╚██████╔╝██║  ██║██║██████╔╝            ║
+  ║                              ╚═════╝ ╚═╝  ╚═╝╚═╝╚═════╝             ║
+  ║                                                                      ║
+  ║   Agent-to-Agent negotiation, settlement, and attestation            ║
+  ║   on the Kite AI testnet  ·  x402  ·  ERC-8004  ·  Game theory       ║
+  ╚══════════════════════════════════════════════════════════════════════╝{RESET}
 """)
 
 
@@ -90,12 +136,24 @@ def section(title: str, icon: str = "▸") -> None:
     print(DBAR)
 
 
+def act_header(act: int, title: str) -> None:
+    print(f"\n{BOLD}{BG_BLUE}{WHITE}  ACT {act}  —  {title}  {RESET}\n")
+
+
 def step(msg: str) -> None:
     print(f"  {DIM}→{RESET} {msg}")
 
 
 def ok(msg: str) -> None:
     print(f"  {GREEN}✓{RESET} {msg}")
+
+
+def warn(msg: str) -> None:
+    print(f"  {YELLOW}⚠{RESET} {msg}")
+
+
+def fail(msg: str) -> None:
+    print(f"  {RED}✗{RESET} {msg}")
 
 
 def info_box(title: str, lines: list[str]) -> None:
@@ -109,413 +167,765 @@ def info_box(title: str, lines: list[str]) -> None:
     print(f"  {CYAN}└{'─' * w}┘{RESET}")
 
 
+def kitescan_link(tx_hash: str) -> str:
+    if not tx_hash:
+        return "(no tx)"
+    h = tx_hash if tx_hash.startswith("0x") else f"0x{tx_hash}"
+    return f"{config.kite.explorer_url}tx/{h}"
+
+
+def kitescan_addr_link(address: str) -> str:
+    return f"{config.kite.explorer_url}address/{address}"
+
+
 # ---------------------------------------------------------------------------
-# Demo agent metadata
+# Bootstrap: env, web3, contract clients, preflight
 # ---------------------------------------------------------------------------
+
 
 @dataclass
-class AgentInfo:
-    agent_id: str
-    name: str
-    address: str
-    role: str
-    reputation_score: float
-    total_deals: int
-    tags: list[str] = field(default_factory=list)
+class DemoContext:
+    """Everything the three acts share: clients, accounts, prices."""
+
+    w3: Web3
+    buyer_account: Any
+    identity: IdentityClient
+    reputation: ReputationClient
+    deal_record: DealRecordClient
+    settler: X402Settler
+    surprise_seller_addr: str = ""
+    surprise_agent_id: int = 0
+    low_rep_seller_addr: str = ""
+    low_rep_agent_id: int = 0
+    txs: list[dict[str, Any]] = field(default_factory=list)
+
+    def record_tx(self, kind: str, tx_hash: str, note: str = "") -> None:
+        if tx_hash:
+            self.txs.append({"kind": kind, "tx": tx_hash, "note": note})
 
 
-BUYER = AgentInfo(
-    agent_id="agent-001",
-    name="DataBuyer-Alpha",
-    address="0x742d35Cc6634C0532925a3b844Bc9e7595f2bD18",
-    role="buyer",
-    reputation_score=4.8,
-    total_deals=47,
-    tags=["weather-data", "premium-api", "bulk-consumer"],
-)
+def _require_env() -> None:
+    missing = []
+    if not config.kite.private_key:
+        missing.append("PRIVATE_KEY")
+    if not config.contracts.identity_registry:
+        missing.append("IDENTITY_REGISTRY_ADDR")
+    if not config.contracts.reputation_registry:
+        missing.append("REPUTATION_REGISTRY_ADDR")
+    if not config.contracts.deal_record:
+        missing.append("DEALRECORD_CONTRACT_ADDR")
+    if missing:
+        fail(f"Missing env vars: {', '.join(missing)}")
+        print(
+            f"  Run {YELLOW}node contracts/scripts/write_env_files.js{RESET} after deploying."
+        )
+        sys.exit(1)
 
-SELLER = AgentInfo(
-    agent_id="agent-002",
-    name="WeatherPro-Service",
-    address="0x209693Bc6412A8b3D23E1bF6E1d59EbFf95bC2cE",
-    role="seller",
-    reputation_score=4.5,
-    total_deals=123,
-    tags=["weather-api", "geolocation", "high-uptime"],
-)
+
+def _build_web3() -> Web3:
+    w3 = Web3(Web3.HTTPProvider(config.kite.rpc_url, request_kwargs={"timeout": 30}))
+    # Kite Testnet is a POA chain; the extraData middleware avoids decode errors.
+    try:
+        w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
+    except Exception:
+        pass
+    if not w3.is_connected():
+        fail(f"Web3 not connected to {config.kite.rpc_url}")
+        sys.exit(1)
+    return w3
+
+
+async def _check_surprise_api(client: httpx.AsyncClient) -> dict[str, Any]:
+    try:
+        r = await client.get(f"{SURPRISE_API_BASE}/healthz", timeout=3.0)
+        r.raise_for_status()
+        return r.json()
+    except Exception as exc:
+        fail(f"Surprise API not reachable at {SURPRISE_API_BASE}: {exc}")
+        print(f"\n  Start it in a second terminal with:\n")
+        print(f"    {YELLOW}.venv-demo\\Scripts\\python -m uvicorn surprise_api.app:app --port 8001{RESET}\n")
+        sys.exit(1)
+
+
+async def _fetch_agent_card(client: httpx.AsyncClient) -> dict[str, Any]:
+    r = await client.get(f"{SURPRISE_API_BASE}/.well-known/agent.json", timeout=5.0)
+    r.raise_for_status()
+    return r.json()
+
+
+async def _reset_surprise_pricing(client: httpx.AsyncClient) -> None:
+    """Wipe any prior demo state from a previous run."""
+    try:
+        await client.post(f"{SURPRISE_API_BASE}/admin/reset", timeout=3.0)
+    except Exception:
+        pass
+
+
+async def _sync_deal_to_surprise(
+    client: httpx.AsyncClient,
+    *,
+    route: str,
+    price_atomic: int,
+    deal_hash_hex: str,
+    expected_buyer: str,
+) -> dict[str, Any]:
+    r = await client.post(
+        f"{SURPRISE_API_BASE}/admin/sync-deal",
+        json={
+            "route": route,
+            "price_atomic": price_atomic,
+            "deal_hash": deal_hash_hex,
+            "expected_buyer": expected_buyer,
+        },
+        timeout=5.0,
+    )
+    r.raise_for_status()
+    return r.json()
 
 
 # ---------------------------------------------------------------------------
-# NL message generator for demo display
+# x402 helpers — speak the real HTTP 402 handshake to surprise_api
 # ---------------------------------------------------------------------------
 
-def _nl_for_round(role: str, price_display: float, rnd: int, total: int, deals: int) -> str:
-    """Generate natural-language offer text (template mode — no LLM needed)."""
-    t = rnd / max(total, 1)
-    if role == "buyer":
-        if t < 0.3:
-            return f"I'd like to start at ${price_display:.4f}/call. Given current market rates and my volume needs, this seems fair."
-        elif t < 0.7:
-            return f"I can move to ${price_display:.4f}. I value reliability — let's find a price that works for both of us."
-        else:
-            return f"My best offer: ${price_display:.4f}. I'm near my budget ceiling but genuinely want to close this deal."
-    else:
-        if t < 0.3:
-            return f"My service at ${price_display:.4f}/call includes sub-150ms latency, 99.9% uptime, and 200 RPS throughput."
-        elif t < 0.7:
-            return f"I can come down to ${price_display:.4f}. This covers infrastructure costs while maintaining SLA guarantees."
-        else:
-            return f"${price_display:.4f} is where I need to be. I've completed {deals} deals at this quality."
+
+async def fetch_402_payment_requirements(
+    client: httpx.AsyncClient, route: str
+) -> dict[str, Any]:
+    """GET the route without payment; expect a 402 body with PaymentRequirements."""
+    r = await client.get(f"{SURPRISE_API_BASE}{route}", timeout=10.0)
+    if r.status_code != 402:
+        raise RuntimeError(
+            f"Expected 402 from {route}, got {r.status_code}: {r.text[:200]}"
+        )
+    body = r.json()
+    accepts = body.get("accepts") or []
+    if not accepts:
+        raise RuntimeError(f"402 body had no 'accepts' array: {body}")
+    return accepts[0]
+
+
+def _sign_x_payment_header(
+    *,
+    buyer: Any,
+    payment_requirements: dict[str, Any],
+) -> str:
+    """Sign the EIP-712 ``TransferWithAuthorization`` and pack the X-Payment header."""
+    import base64
+    import json
+
+    asset = payment_requirements.get("asset", config.kite.test_usdt_addr)
+    pay_to = payment_requirements["payTo"]
+    amount = payment_requirements["maxAmountRequired"]
+    network = payment_requirements.get("network", config.x402.network)
+    chain_id = int(network.split(":")[-1])
+
+    nonce_hex = "0x" + Web3.keccak(text=f"{buyer.address}{time.time_ns()}").hex().lstrip("0x")
+    nonce_hex = "0x" + nonce_hex[2:].rjust(64, "0")
+    valid_before = int(time.time()) + payment_requirements.get(
+        "maxTimeoutSeconds", DEFAULT_MAX_TIMEOUT_SECONDS
+    )
+
+    authorization = {
+        "from": buyer.address,
+        "to": pay_to,
+        "value": str(amount),
+        "validAfter": "0",
+        "validBefore": str(valid_before),
+        "nonce": nonce_hex,
+    }
+    typed = build_transfer_with_authorization_typed_data(authorization, asset, chain_id)
+    signed = buyer.sign_typed_data(typed["domain"], typed["types"], typed["message"])
+    sig_hex = signed.signature.hex()
+    if not sig_hex.startswith("0x"):
+        sig_hex = "0x" + sig_hex
+
+    payment_payload = {
+        "x402Version": X402_JSON_VERSION,
+        "scheme": payment_requirements.get("scheme", "exact"),
+        "network": network,
+        "payload": {
+            "signature": sig_hex,
+            "authorization": authorization,
+        },
+    }
+    raw = json.dumps(payment_payload).encode("utf-8")
+    return base64.b64encode(raw).decode("ascii")
+
+
+async def pay_surprise_api(
+    client: httpx.AsyncClient,
+    *,
+    route: str,
+    payment_requirements: dict[str, Any],
+    buyer: Any,
+) -> dict[str, Any]:
+    header = _sign_x_payment_header(buyer=buyer, payment_requirements=payment_requirements)
+    r = await client.get(
+        f"{SURPRISE_API_BASE}{route}",
+        headers={"X-Payment": header},
+        timeout=15.0,
+    )
+    r.raise_for_status()
+    return r.json()
 
 
 # ---------------------------------------------------------------------------
-# Main demo
+# ACT 1 — Without NegotiatorGrid (naive list-price payment)
 # ---------------------------------------------------------------------------
 
-async def run_demo() -> None:
-    banner()
-    total_start = time.time()
 
-    # ═══════════════════════════════════════════════════════════════════════
-    # STAGE 1: Agent Registration (IdentityClient — ERC-8004 mock)
-    # ═══════════════════════════════════════════════════════════════════════
-    section("STAGE 1: Agent Registration (ERC-8004 Identity)", "🔐")
+async def act1_baseline(ctx: DemoContext, client: httpx.AsyncClient) -> dict[str, Any]:
+    act_header(1, "WITHOUT NegotiatorGrid  ·  naive buyer pays list price")
 
-    identity = IdentityClient(w3=None, contract_address="", private_key="")
+    step("Buyer hits Surprise API directly, no negotiation, no policy.")
+    pr = await fetch_402_payment_requirements(client, NVDA_ROUTE)
+    list_price_atomic = int(pr["maxAmountRequired"])
+    list_price_display = list_price_atomic / USDT_DECIMALS
+    seller = pr["payTo"]
 
-    step("Registering buyer agent...")
-    await asyncio.sleep(0.3)
-    buyer_agent_id = await identity.register_agent(
-        f"https://negotiatorgrid.dev/agents/{BUYER.agent_id}.json"
-    )
-    await identity.set_agent_wallet(buyer_agent_id, BUYER.address)
-    info_box(f"Buyer: {BUYER.name}", [
-        f"Agent ID:    {BUYER.agent_id}",
-        f"Address:     {BUYER.address}",
-        f"Role:        {BUYER.role}",
-        f"Tags:        {', '.join(BUYER.tags)}",
-    ])
-    ok(f"Buyer registered: {BUYER.name}")
-
-    await asyncio.sleep(0.2)
-    step("Registering seller agent...")
-    await asyncio.sleep(0.3)
-    seller_agent_id = await identity.register_agent(
-        f"https://negotiatorgrid.dev/agents/{SELLER.agent_id}.json"
-    )
-    await identity.set_agent_wallet(seller_agent_id, SELLER.address)
-    info_box(f"Seller: {SELLER.name}", [
-        f"Agent ID:    {SELLER.agent_id}",
-        f"Address:     {SELLER.address}",
-        f"Role:        {SELLER.role}",
-        f"Tags:        {', '.join(SELLER.tags)}",
-    ])
-    ok(f"Seller registered: {SELLER.name}")
-
-    # ═══════════════════════════════════════════════════════════════════════
-    # STAGE 2: Reputation Lookup (ReputationFeed — mock)
-    # ═══════════════════════════════════════════════════════════════════════
-    section("STAGE 2: Reputation Lookup", "⭐")
-    await asyncio.sleep(0.2)
-
-    reputation_client = ReputationClient(w3=None, contract_address="", private_key="")
-    deal_record_client = DealRecordClient(w3=None, contract_address="", private_key="")
-    rep_feed = ReputationFeed(reputation_client, deal_record_client)
-
-    for agent in [BUYER, SELLER]:
-        stars = "★" * int(agent.reputation_score) + "☆" * (5 - int(agent.reputation_score))
-        print(f"  {CYAN}{agent.name}{RESET}  {YELLOW}{stars}{RESET}  "
-              f"({agent.reputation_score}/5.0)  "
-              f"{DIM}{agent.total_deals} completed deals{RESET}")
-
-    buyer_strategy = ReputationFeed.map_reputation_to_strategy(BUYER.reputation_score / 5.0)
-    seller_strategy = ReputationFeed.map_reputation_to_strategy(SELLER.reputation_score / 5.0)
-
-    ok("Reputation data loaded from on-chain registry")
-    step(f"Buyer reputation {YELLOW}{BUYER.reputation_score}/5.0{RESET} → strategy: {buyer_strategy['label']}")
-    step(f"Seller reputation {YELLOW}{SELLER.reputation_score}/5.0{RESET} → strategy: {seller_strategy['label']}")
-
-    # ═══════════════════════════════════════════════════════════════════════
-    # STAGE 3: Bilateral Negotiation (NegotiationSession — NegMAS)
-    # ═══════════════════════════════════════════════════════════════════════
-    section("STAGE 3: Bilateral Negotiation (7-Round SAOP)", "🤝")
-
-    # Price range in "millicents": 500–1500 → display as $0.05–$0.15
-    PRICE_SCALE = 10000.0  # units → display dollars
-    price_min = 500.0
-    price_max = 1500.0
-    buyer_reservation = 1200.0   # buyer max: willing to pay up to $0.12
-    seller_reservation = 800.0   # seller min: willing to accept down to $0.08
-    max_rounds = 7
-
-    # Create opponent modelers for both sides
-    buyer_om = OpponentModeler(
-        is_opponent_seller=True, price_min=price_min, price_max=price_max
-    )
-    seller_om = OpponentModeler(
-        is_opponent_seller=False, price_min=price_min, price_max=price_max
+    info_box(
+        "402 Payment Required",
+        [
+            f"Route:        {NVDA_ROUTE}",
+            f"List price:   ${list_price_display:.4f} USDT",
+            f"Pay to:       {seller}",
+            f"Network:      {pr['network']}",
+            f"Asset:        USDT.test ({pr['asset'][:18]}...)",
+        ],
     )
 
-    # Build NegotiationConfig and run the REAL NegMAS SAOMechanism
-    neg_config = NegotiationConfig(
+    step("Signing X-Payment header and paying full list price...")
+    data = await pay_surprise_api(client, route=NVDA_ROUTE, payment_requirements=pr, buyer=ctx.buyer_account)
+
+    quote = data["data"]
+    paid = data["paid_amount_atomic"] or 0
+    tx = data.get("tx_hash") or ""
+    ctx.record_tx("x402_baseline", tx, "Act 1 naive payment")
+
+    ok("NVDA quote received (no negotiation discount).")
+    info_box(
+        "Quote (Act 1)",
+        [
+            f"Symbol:    {quote['symbol']}",
+            f"Price USD: ${quote['price_usd']:.2f}  ({quote['change_pct']:+.2f}%)",
+            f"Volume:    {quote['volume']:,}",
+            f"Source:    {quote['source']}",
+            f"Paid:      ${paid / USDT_DECIMALS:.4f} USDT  (= list price)",
+        ],
+    )
+    print(f"  {DIM}No on-chain attestation. No deal hash. No reputation update.{RESET}")
+    return {
+        "price_atomic": list_price_atomic,
+        "price_display": list_price_display,
+        "seller": seller,
+        "quote": quote,
+    }
+
+
+# ---------------------------------------------------------------------------
+# ACT 2 — With NegotiatorGrid (happy path + hash-mismatch hero)
+# ---------------------------------------------------------------------------
+
+
+def _run_negotiation(
+    *,
+    buyer_id: str,
+    seller_id: str,
+    list_price_atomic: int,
+    buyer_reservation_atomic: int,
+    seller_reservation_atomic: int,
+    buyer_exponent: float = 4.0,
+    seller_exponent: float = 4.0,
+    max_rounds: int = 7,
+) -> Any:
+    """Run a NegMAS bilateral SAOP and tag the result with real wallet IDs."""
+    # We discretise pricing into a 200-step grid over [min, max] for NegMAS.
+    price_min = float(min(buyer_reservation_atomic, seller_reservation_atomic) - 5_000)
+    price_max = float(max(buyer_reservation_atomic, seller_reservation_atomic) + 5_000)
+    price_min = max(price_min, 1.0)
+
+    cfg = NegotiationConfig(
         max_rounds=max_rounds,
         timeout_seconds=30,
         price_min=price_min,
         price_max=price_max,
-        buyer_reservation=buyer_reservation,
-        seller_reservation=seller_reservation,
+        buyer_reservation=float(buyer_reservation_atomic),
+        seller_reservation=float(seller_reservation_atomic),
     )
-
+    buyer_om = OpponentModeler(is_opponent_seller=True, price_min=price_min, price_max=price_max)
+    seller_om = OpponentModeler(is_opponent_seller=False, price_min=price_min, price_max=price_max)
     session = NegotiationSession(
-        config=neg_config,
+        config=cfg,
         buyer_opponent_modeler=buyer_om,
         seller_opponent_modeler=seller_om,
-        buyer_exponent=4.0,   # Boulware
-        seller_exponent=4.0,  # Boulware
+        buyer_exponent=buyer_exponent,
+        seller_exponent=seller_exponent,
     )
+    result = session.run()
 
-    result = session.run()  # ← THIS IS THE REAL NEGMAS ENGINE
+    # Re-tag with real on-chain identifiers so deal_hash bytes match Solidity.
+    result.buyer_id = buyer_id
+    result.seller_id = seller_id
+    return result
 
-    # Post-process transcript: group into buyer/seller rounds, run Nash checks
-    guardrail = NashGuardrail(deviation_threshold=0.20)
-    offer_gen = OfferGenerator()  # no API key → template fallback
 
-    # Group transcript offers into rounds
-    buyer_offers: list[float] = []
-    seller_offers: list[float] = []
-    rounds_display: list[dict[str, Any]] = []
-
-    # The transcript alternates buyer/seller offers
-    round_num = 0
-    current_round: dict[str, Any] = {}
+def _print_rounds(result: Any, buyer_label: str, seller_label: str) -> None:
+    """Render a transcript as alternating buyer/seller rounds."""
+    rounds: list[dict[str, Any]] = []
+    cur: dict[str, Any] = {}
+    rn = 0
     for offer in result.transcript:
-        if offer.agent_id == "buyer":
-            round_num += 1
-            current_round = {"round": round_num, "buyer_price": offer.price}
-            buyer_offers.append(offer.price)
-        elif offer.agent_id == "seller":
-            current_round["seller_price"] = offer.price
-            seller_offers.append(offer.price)
-
-            # Opponent model from buyer's perspective
-            om_data = buyer_om.get_model()
-
-            # Nash guardrail check
-            bp_display = current_round["buyer_price"] / PRICE_SCALE
-            sp_display = current_round["seller_price"] / PRICE_SCALE
-            nash_result = guardrail.check_deal(
-                agreed_price=(current_round["buyer_price"] + current_round["seller_price"]) / 2,
-                buyer_ufun=lambda p: max(0, (buyer_reservation - p) / (buyer_reservation - price_min)),
-                seller_ufun=lambda p: max(0, (p - seller_reservation) / (price_max - seller_reservation)),
-                price_min=price_min,
-                price_max=price_max,
-            )
-
-            current_round["om"] = om_data
-            current_round["nash"] = "PASS" if nash_result.passed else "WARN"
-            rounds_display.append(current_round)
-
-    # Display each round
-    total_rounds = len(rounds_display)
-    for rd in rounds_display:
-        r = rd["round"]
-        bp = rd["buyer_price"] / PRICE_SCALE
-        sp = rd["seller_price"] / PRICE_SCALE
-        om = rd["om"]
-
-        bnl = _nl_for_round("buyer", bp, r, max_rounds, BUYER.total_deals)
-        snl = _nl_for_round("seller", sp, r, max_rounds, SELLER.total_deals)
-
-        print(f"\n  {BOLD}{BG_BLUE}{WHITE} ROUND {r}/{max_rounds} {RESET}")
-        print(BAR)
-
-        print(f"  {BLUE}BUYER  →{RESET}  ${bp:.4f}  {DIM}{BUYER.name}{RESET}")
-        print(f"         {DIM}\"{bnl}\"{RESET}")
-
-        print(f"  {MAGENTA}SELLER →{RESET}  ${sp:.4f}  {DIM}{SELLER.name}{RESET}")
-        print(f"         {DIM}\"{snl}\"{RESET}")
-
-        # Opponent model display
-        if om.confidence > 0.01:
-            opp_str = f"est. reservation: ${om.estimated_reservation_price / PRICE_SCALE:.4f} (conf: {om.confidence:.0%})"
+        role = "buyer" if offer.agent_id == "buyer" else "seller"
+        if role == "buyer":
+            rn += 1
+            cur = {"r": rn, "buyer": offer.price}
         else:
-            opp_str = f"insufficient data (conf: {om.confidence:.0%})"
+            cur["seller"] = offer.price
+            rounds.append(cur)
 
-        nc_color = GREEN if rd["nash"] == "PASS" else YELLOW
-        print(f"  {DIM}Opponent model:{RESET} {opp_str}")
-        print(f"  {DIM}Nash check:{RESET}     {nc_color}{rd['nash']}{RESET}")
+    guard = NashGuardrail(deviation_threshold=0.20)
+    bres = float(result.transcript[0].price) if result.transcript else 0.0
+    for rd in rounds:
+        bp = rd["buyer"] / USDT_DECIMALS
+        sp = rd.get("seller", rd["buyer"]) / USDT_DECIMALS
+        print(f"\n  {BG_BLUE}{WHITE}{BOLD} ROUND {rd['r']} {RESET}")
+        print(f"  {BLUE}{buyer_label:<22}{RESET}  ${bp:.4f}")
+        print(f"  {MAGENTA}{seller_label:<22}{RESET}  ${sp:.4f}")
 
-        await asyncio.sleep(0.5)
 
-    # Display agreement
-    agreed_price = result.agreed_price
-    if agreed_price is not None:
-        agreed_display = agreed_price / PRICE_SCALE
-        print(f"\n  {BG_GREEN}{BLACK}{BOLD} ✓ DEAL AGREED {RESET}  "
-              f"Price: {GREEN}${agreed_display:.4f}{RESET}  "
-              f"Round: {total_rounds}/{max_rounds}")
-    else:
-        # Fallback: split last offers
-        agreed_price = (buyer_offers[-1] + seller_offers[-1]) / 2 if buyer_offers else 0
-        agreed_display = agreed_price / PRICE_SCALE
-        print(f"\n  {BG_YELLOW}{BOLD} ≈ CONVERGED {RESET}  "
-              f"Split price: {GREEN}${agreed_display:.4f}{RESET}")
+async def act2_with_negotiatorgrid(
+    ctx: DemoContext,
+    client: httpx.AsyncClient,
+    agent_card: dict[str, Any],
+) -> dict[str, Any]:
+    act_header(2, "WITH NegotiatorGrid  ·  discovery → negotiation → attestation")
 
-    agreed_display = (agreed_price or 0) / PRICE_SCALE
+    # -- Stage A: Discovery (real /.well-known + ERC-8004 identity check) --
+    section("Stage A: Discovery (A2A + ERC-8004)", "🔍")
 
-    # Compute utilities
-    if agreed_price and buyer_reservation != price_min:
-        b_util = max(0, min(1, (buyer_reservation - agreed_price) / (buyer_reservation - price_min)))
-    else:
-        b_util = 0.0
-    if agreed_price and price_max != seller_reservation:
-        s_util = max(0, min(1, (agreed_price - seller_reservation) / (price_max - seller_reservation)))
-    else:
-        s_util = 0.0
+    step(f"GET {SURPRISE_API_BASE}/.well-known/agent.json (A2A protocol v0.2.9)")
+    advertised_seller = agent_card["registrations"][0]["agentAddress"]
+    advertised_id = int(agent_card["registrations"][0]["agentId"])
 
-    print(f"\n  {DIM}Deal hash:      {RESET}{result.deal_hash[:20]}..." if result.deal_hash else "")
-    print(f"  {DIM}Buyer utility:  {RESET}{b_util:.3f}")
-    print(f"  {DIM}Seller utility: {RESET}{s_util:.3f}")
-
-    # ═══════════════════════════════════════════════════════════════════════
-    # STAGE 4: x402 Payment Settlement (X402Settler — mock facilitator)
-    # ═══════════════════════════════════════════════════════════════════════
-    section("STAGE 4: x402 Payment Settlement", "💰")
-    step("Constructing PaymentRequirements from negotiated price...")
-    await asyncio.sleep(0.3)
-
-    settler = X402Settler()
-    atomic_price = int(agreed_display * 1_000_000)  # USDT has 6 decimals
-    payment_req = settler.create_payment_requirements(
-        agreed_price=atomic_price,
-        seller_wallet=SELLER.address,
-        resource_url="/api/weather",
-        deal_hash=result.deal_hash or "",
+    info_box(
+        "Discovered service (Surprise API)",
+        [
+            f"Name:               {agent_card['name']}",
+            f"Description:        {agent_card['description'][:55]}",
+            f"x402-capable:       {agent_card['capabilities'].get('x402', False)}",
+            f"NVDA quote route:   {NVDA_ROUTE}",
+            f"Advertised agent#:  {advertised_id}",
+            f"Advertised wallet:  {advertised_seller}",
+        ],
     )
 
-    print(f"  {DIM}scheme:     {payment_req['scheme']}{RESET}")
-    print(f"  {DIM}network:    {payment_req['network']} (Kite Testnet){RESET}")
-    print(f"  {DIM}amount:     ${agreed_display:.4f} USDT{RESET}")
-    print(f"  {DIM}payTo:      {SELLER.address[:20]}...{RESET}")
-    print(f"  {DIM}facilitator: 0x12343e649e6b2b...3C78b{RESET}")
+    step("Registering advertised seller on IdentityRegistry (Kite Testnet)...")
+    onchain_seller_id = await ctx.identity.register_agent(
+        f"https://surprise.negotiatorgrid.dev/agents/{advertised_id}.json",
+        metadata={"role": "seller", "service": "surprise-api"},
+    )
+    if onchain_seller_id <= 0:
+        onchain_seller_id = advertised_id or 1
+    ctx.surprise_agent_id = onchain_seller_id
+    ctx.surprise_seller_addr = advertised_seller
 
-    step("Signing payment payload...")
-    await asyncio.sleep(0.4)
-    step("Submitting to Kite facilitator...")
-    await asyncio.sleep(0.5)
+    await ctx.identity.set_agent_wallet(onchain_seller_id, advertised_seller)
+    ok(f"Seller bound on-chain: agentId={onchain_seller_id} → {advertised_seller}")
 
-    settlement = await settler.settle_payment(payment_req)
-
-    if settlement.success:
-        ok("Settlement confirmed!")
-        print(f"  {DIM}Tx hash:  {RESET}{settlement.tx_hash[:30]}...")
-        print(f"  {DIM}Network:  {RESET}{settlement.network or 'eip155:2368'}")
-        print(f"  {DIM}Amount:   {RESET}${agreed_display:.4f} USDT")
+    onchain_wallet = ctx.identity.get_agent_wallet(onchain_seller_id)
+    matches = onchain_wallet.lower() == advertised_seller.lower()
+    if matches:
+        ok(f"ERC-8004 wallet check passed (on-chain == advertised).")
     else:
-        print(f"  {YELLOW}⚠{RESET} Settlement via facilitator unavailable: {settlement.error_reason}")
-        ok("Mock settlement used for demo")
-        settlement_tx = settlement.tx_hash or "0x" + "f" * 64
-        print(f"  {DIM}Tx hash:  {RESET}{settlement_tx[:30]}...")
+        warn(f"ERC-8004 wallet mismatch: on-chain={onchain_wallet} advertised={advertised_seller}")
 
-    # ═══════════════════════════════════════════════════════════════════════
-    # STAGE 5: On-Chain Attestation (AttestationPipeline — DealRecord mock)
-    # ═══════════════════════════════════════════════════════════════════════
-    section("STAGE 5: On-Chain Attestation (DealRecord)", "📜")
-    step("Recording deal on Kite blockchain...")
-    await asyncio.sleep(0.5)
+    # -- Stage B: Reputation lookup --
+    section("Stage B: Reputation lookup (ReputationRegistry)", "⭐")
+    feed = ReputationFeed(ctx.reputation, ctx.deal_record)
+    profile = feed.get_agent_reputation(advertised_seller)
+    rep_score = float(getattr(profile, "reputation_score", 0.85))
+    strategy = ReputationFeed.map_reputation_to_strategy(rep_score)
+    info_box(
+        "Seller reputation",
+        [
+            f"Score:            {rep_score:.2f} / 1.0",
+            f"Buyer strategy:   {strategy['label']}",
+            f"Boulware/Conceder exponent (Act 2): {strategy.get('exponent', 4.0):.2f}",
+        ],
+    )
 
-    pipeline = AttestationPipeline(deal_record_client, reputation_client, identity)
+    # -- Stage C: Bilateral negotiation --
+    section("Stage C: Bilateral negotiation (NegMAS SAOP)", "🤝")
+    print(f"  {DIM}Buyer reservation: $0.0300 (would accept up to list price){RESET}")
+    print(f"  {DIM}Seller reservation: $0.0220 (will not go below){RESET}")
+
+    result = _run_negotiation(
+        buyer_id=ctx.buyer_account.address,
+        seller_id=advertised_seller,
+        list_price_atomic=NVDA_LIST_PRICE_ATOMIC,
+        buyer_reservation_atomic=30_000,
+        seller_reservation_atomic=22_000,
+        buyer_exponent=float(strategy.get("exponent", 4.0)),
+        seller_exponent=4.0,
+    )
+
+    _print_rounds(result, "BUYER", "SELLER (Surprise)")
+    if result.agreed_price is None:
+        fail("Negotiation did not converge")
+        sys.exit(1)
+    agreed_atomic = int(result.agreed_price)
+    agreed_display = agreed_atomic / USDT_DECIMALS
+    savings_atomic = NVDA_LIST_PRICE_ATOMIC - agreed_atomic
+    savings_display = savings_atomic / USDT_DECIMALS
+    savings_pct = (savings_atomic / NVDA_LIST_PRICE_ATOMIC) * 100.0
+
+    deal_hash_hex = compute_binding_deal_hash_hex_from_result(
+        result, bound_at=result.deal_bound_at, resource_uri=NVDA_ROUTE
+    )
+
+    print(f"\n  {BG_GREEN}{BLACK}{BOLD}  DEAL  {RESET}  "
+          f"Price: {GREEN}${agreed_display:.4f}{RESET}  "
+          f"vs list ${NVDA_LIST_PRICE_ATOMIC / USDT_DECIMALS:.4f}  "
+          f"({GREEN}−{savings_pct:.1f}%{RESET})")
+    print(f"  {DIM}Off-chain binding hash:  {result.deal_hash[:34]}...{RESET}")
+    print(f"  {DIM}On-chain canonical hash: {deal_hash_hex[:34]}...{RESET}")
+    print(f"  {DIM}Bound at (unix sec):     {result.deal_bound_at}{RESET}")
+
+    # -- Stage D: HERO #1 — hash-mismatch rejection --
+    section("Stage D: Hash-mismatch rejection (autonomy hero shot)", "🛡️")
+    print(f"  {DIM}Buyer agreed on ${agreed_display:.4f}. Seller still advertises list price.{RESET}")
+
+    step("Buyer fetches a fresh 402 from the seller...")
+    stale_pr = await fetch_402_payment_requirements(client, NVDA_ROUTE)
+    stale_price_atomic = int(stale_pr["maxAmountRequired"])
+    stale_display = stale_price_atomic / USDT_DECIMALS
+
+    print(f"  {DIM}Seller's 402 maxAmountRequired:  {stale_display:.4f} USDT{RESET}")
+    print(f"  {DIM}Negotiated price:                {agreed_display:.4f} USDT{RESET}")
+
     try:
-        attest_hash = await pipeline.attest_deal(result, settlement.tx_hash or "")
-        ok("DealRecord written to chain!")
-        attest_tx = f"0x{attest_hash[:40]}" if not attest_hash.startswith("0x") else attest_hash
-    except Exception as e:
-        attest_tx = "0x" + "a" * 64
-        ok(f"DealRecord written (mock): {str(e)[:30]}")
+        ctx.settler.verify_payment_requirements(
+            agreed_price_atomic=agreed_atomic,
+            deal_hash=deal_hash_hex,
+            seller_wallet=advertised_seller,
+            resource_url=NVDA_ROUTE,
+            payment_requirements=stale_pr,
+        )
+        warn("Verification did not reject the stale 402 — check demo state.")
+    except DealHashMismatchError as exc:
+        print(f"\n  {BG_RED}{WHITE}{BOLD}  PAYMENT BLOCKED  {RESET}")
+        print(f"  {RED}Field mismatched:{RESET}  {exc.field}")
+        print(f"  {RED}Expected:{RESET}         {exc.expected}")
+        print(f"  {RED}Actual:{RESET}           {exc.actual}")
+        avoided = (int(exc.actual_atomic or 0) - agreed_atomic) / USDT_DECIMALS if exc.actual_atomic else 0.0
+        if avoided > 0:
+            print(f"  {GREEN}Overpayment avoided:{RESET} ${avoided:.4f} USDT  "
+                  f"({GREEN}{avoided / agreed_display * 100:.1f}%{RESET})")
 
-    kitescan_url = f"https://testnet.kitescan.ai/tx/{attest_tx}"
-    info_box("Attestation Details", [
-        f"Deal hash:        {(result.deal_hash or attest_tx)[:30]}...",
-        f"Buyer agent:      {BUYER.agent_id}",
-        f"Seller agent:     {SELLER.agent_id}",
-        f"Agreed price:     ${agreed_display:.4f} USDT",
-        f"Rounds:           {total_rounds}",
-        f"x402 tx:          {(settlement.tx_hash or 'mock')[:30]}...",
-        f"KiteScan:         {kitescan_url[:50]}...",
-    ])
+    # Demonstrate the second variant too: tamper extra.deal_hash and re-verify.
+    print(f"\n  {DIM}Variant: same price, but seller mutates extra.deal_hash.{RESET}")
+    tampered = dict(stale_pr)
+    tampered["maxAmountRequired"] = str(agreed_atomic)  # honest price
+    tampered["extra"] = {**tampered.get("extra", {}), "deal_hash": "0xdeadbeef"}
+    try:
+        ctx.settler.verify_payment_requirements(
+            agreed_price_atomic=agreed_atomic,
+            deal_hash=deal_hash_hex,
+            seller_wallet=advertised_seller,
+            resource_url=NVDA_ROUTE,
+            payment_requirements=tampered,
+        )
+        warn("Tampered deal hash slipped through — check verify logic.")
+    except DealHashMismatchError as exc:
+        print(f"  {RED}✗ Tampered extra.deal_hash blocked{RESET} "
+              f"({DIM}{exc.field}: {str(exc.expected)[:20]}... vs {str(exc.actual)[:20]}...{RESET})")
 
-    # ═══════════════════════════════════════════════════════════════════════
-    # STAGE 6: Summary
-    # ═══════════════════════════════════════════════════════════════════════
-    total_duration = time.time() - total_start
+    # -- Stage E: Sync deal, re-fetch, pay for real --
+    section("Stage E: Policy sync + real x402 settlement", "💰")
+    step("NegotiatorGrid policy pushes negotiated terms to the seller...")
+    await _sync_deal_to_surprise(
+        client,
+        route=NVDA_ROUTE,
+        price_atomic=agreed_atomic,
+        deal_hash_hex=deal_hash_hex,
+        expected_buyer=ctx.buyer_account.address,
+    )
+    ok(f"Seller PricingStore updated: {NVDA_ROUTE} → ${agreed_display:.4f}")
+
+    step("Buyer re-fetches the 402...")
+    fresh_pr = await fetch_402_payment_requirements(client, NVDA_ROUTE)
+    ctx.settler.verify_payment_requirements(
+        agreed_price_atomic=agreed_atomic,
+        deal_hash=deal_hash_hex,
+        seller_wallet=advertised_seller,
+        resource_url=NVDA_ROUTE,
+        payment_requirements=fresh_pr,
+    )
+    ok("PaymentRequirements now match — buyer accepts.")
+
+    step("Signing EIP-712 TransferWithAuthorization, sending X-Payment...")
+    paid = await pay_surprise_api(client, route=NVDA_ROUTE, payment_requirements=fresh_pr, buyer=ctx.buyer_account)
+    x402_tx = paid.get("tx_hash") or ""
+    ctx.record_tx("x402_negotiated", x402_tx, "Act 2 negotiated payment")
+    quote = paid["data"]
+
+    info_box(
+        "Quote (Act 2 — NegotiatorGrid path)",
+        [
+            f"Symbol:    {quote['symbol']}",
+            f"Price USD: ${quote['price_usd']:.2f}  ({quote['change_pct']:+.2f}%)",
+            f"Paid:      ${paid['paid_amount_atomic'] / USDT_DECIMALS:.4f} USDT",
+            f"Saved:     ${savings_display:.4f}  ({savings_pct:.1f}%) vs list",
+            f"x402 tx:   {(x402_tx or 'local-verify')[:46]}",
+            f"Facilit?   {paid.get('facilitator_used')}",
+        ],
+    )
+
+    # -- Stage F: On-chain attestation (real DealRecord write) --
+    section("Stage F: On-chain attestation (DealRecord)", "📜")
+    step("Writing DealRecord to Kite Testnet...")
+
+    # Build the attestation explicitly so we keep the actual record_tx hash.
+    from negotiatorgrid.core.types import DealAttestation, SLATerms
+
+    bound_at = result.deal_bound_at or int(time.time())
+    final_price_atomic = int((result.agreed_price or 0))
+    opening_buyer = 0
+    opening_seller = 0
+    for offer in result.transcript:
+        if offer.agent_id == "buyer" and opening_buyer == 0:
+            opening_buyer = int(offer.price)
+        elif offer.agent_id == "seller" and opening_seller == 0:
+            opening_seller = int(offer.price)
+
+    x402_bytes = (
+        bytes.fromhex(x402_tx.removeprefix("0x"))
+        if x402_tx and len(x402_tx) >= 64
+        else b"\x00" * 32
+    )
+    attestation = DealAttestation(
+        deal_hash=compute_binding_deal_hash_bytes_from_result(
+            result, bound_at=bound_at, resource_uri=NVDA_ROUTE
+        ),
+        buyer=Web3.to_checksum_address(ctx.buyer_account.address),
+        seller=Web3.to_checksum_address(advertised_seller),
+        buyer_agent_id=0,
+        seller_agent_id=ctx.surprise_agent_id,
+        resource_uri=NVDA_ROUTE,
+        opening_buyer_price=opening_buyer,
+        opening_seller_price=opening_seller,
+        final_price=final_price_atomic,
+        negotiation_rounds=int(result.rounds or 0),
+        sla=SLATerms(),
+        x402_tx_hash=x402_bytes,
+        timestamp=bound_at,
+        settled=bool(x402_tx),
+    )
+    record_tx = await ctx.deal_record.record_deal(attestation)
+    ctx.record_tx("dealrecord", record_tx, "Act 2 attestation")
+
+    info_box(
+        "Attestation",
+        [
+            f"Deal hash:    {deal_hash_hex[:48]}...",
+            f"x402 tx:      {(x402_tx or '(local-verify)')[:48]}",
+            f"DealRecord tx: {(record_tx or '(failed)')[:48]}",
+            f"KiteScan:     {kitescan_link(record_tx)[:60]}",
+        ],
+    )
+
+    return {
+        "agreed_atomic": agreed_atomic,
+        "agreed_display": agreed_display,
+        "savings_display": savings_display,
+        "savings_pct": savings_pct,
+        "deal_hash_hex": deal_hash_hex,
+        "x402_tx": x402_tx,
+        "attest_tx": record_tx,
+        "result": result,
+    }
+
+
+# ---------------------------------------------------------------------------
+# ACT 3 — Reputation-conditioned strategy (second on-chain seller)
+# ---------------------------------------------------------------------------
+
+
+async def act3_reputation_conditioned(
+    ctx: DemoContext, client: httpx.AsyncClient
+) -> dict[str, Any]:
+    act_header(3, "REPUTATION-CONDITIONED STRATEGY  ·  same buyer, low-rep seller")
+
+    # Register a synthetic low-rep seller on-chain
+    section("Stage A: Register second seller on Kite Testnet", "🆕")
+    low_rep_addr = Web3.to_checksum_address("0x" + "ab" * 20)
+    low_rep_id = await ctx.identity.register_agent(
+        "https://negotiatorgrid.dev/agents/sketchy-quotes.json",
+        metadata={"role": "seller", "service": "sketchy-quotes"},
+    )
+    if low_rep_id <= 0:
+        low_rep_id = ctx.surprise_agent_id + 1
+    ctx.low_rep_agent_id = low_rep_id
+    ctx.low_rep_seller_addr = low_rep_addr
+
+    await ctx.identity.set_agent_wallet(low_rep_id, low_rep_addr)
+    ok(f"Registered low-rep seller: agentId={low_rep_id} → {low_rep_addr}")
+
+    section("Stage B: Write negative feedback", "👎")
+    feedback_tx = await ctx.reputation.give_feedback(
+        agent_id=low_rep_id,
+        value=-1,
+        tag1="overpriced",
+        tag2="missed_sla",
+        endpoint=NVDA_ROUTE,
+        feedback_uri="ipfs://demo/feedback/low-rep",
+        feedback_hash=Web3.keccak(text=f"low-rep-feedback-{int(time.time())}"),
+    )
+    ctx.record_tx("reputation_feedback", feedback_tx, "Act 3 negative feedback")
+    ok(f"Negative feedback submitted: tx={feedback_tx[:30]}...")
+    print(f"  KiteScan: {kitescan_link(feedback_tx)}")
+
+    section("Stage C: Reputation-conditioned negotiation", "🧠")
+    feed = ReputationFeed(ctx.reputation, ctx.deal_record)
+    profile = feed.get_agent_reputation(low_rep_addr)
+    rep_score = float(getattr(profile, "reputation_score", 0.25))
+    strategy = ReputationFeed.map_reputation_to_strategy(rep_score)
+
+    info_box(
+        "Buyer's adapted strategy",
+        [
+            f"Seller reputation:   {rep_score:.2f} / 1.0  (low)",
+            f"Label:               {strategy['label']}",
+            f"Exponent:            {strategy.get('exponent', 1.0):.2f}",
+            f"Effect:              less patient, harder concession demands",
+        ],
+    )
+
+    result_lo = _run_negotiation(
+        buyer_id=ctx.buyer_account.address,
+        seller_id=low_rep_addr,
+        list_price_atomic=NVDA_LIST_PRICE_ATOMIC,
+        buyer_reservation_atomic=30_000,
+        seller_reservation_atomic=22_000,
+        buyer_exponent=float(strategy.get("exponent", 1.0)),
+        seller_exponent=4.0,
+    )
+    _print_rounds(result_lo, "BUYER (rep-cond.)", "SELLER (low-rep)")
+
+    if result_lo.agreed_price is None:
+        warn("Low-rep negotiation did not converge (buyer walked away).")
+    else:
+        lo_atomic = int(result_lo.agreed_price)
+        print(f"\n  {BG_YELLOW}{BLACK}{BOLD}  DEAL (Act 3)  {RESET}  "
+              f"Price: {YELLOW}${lo_atomic / USDT_DECIMALS:.4f}{RESET}")
+    return {"result_lo": result_lo}
+
+
+# ---------------------------------------------------------------------------
+# Summary
+# ---------------------------------------------------------------------------
+
+
+def print_summary(
+    ctx: DemoContext,
+    a1: dict[str, Any],
+    a2: dict[str, Any],
+    a3: dict[str, Any] | None,
+    elapsed: float,
+) -> None:
     section("SUMMARY", "📊")
 
+    list_disp = a1["price_display"]
+    neg_disp = a2["agreed_display"]
+    saved = a2["savings_display"]
+    pct = a2["savings_pct"]
+
     print(f"""
-  {BOLD}Negotiation Results{RESET}
+  {BOLD}Per-call price comparison{RESET}
   {BAR}
-  Negotiation ID:       neg-demo-001
-  Total rounds:         {total_rounds}
-  Agreed price:         {GREEN}${agreed_display:.4f} USDT{RESET}
-  Buyer utility:        {b_util:.3f}
-  Seller utility:       {s_util:.3f}
-  Global welfare:       {round((b_util + s_util) / 2, 3):.3f}
+  Without NegotiatorGrid (Act 1):  ${list_disp:.4f} USDT
+  With NegotiatorGrid (Act 2):     ${neg_disp:.4f} USDT
+  Per-call savings:                ${saved:.4f}  ({GREEN}{pct:.1f}%{RESET})
 
-  {BOLD}Settlement{RESET}
-  {BAR}
-  x402 tx:              {(settlement.tx_hash or 'mock')[:40]}...
-  Attestation tx:       {attest_tx[:40]}...
-  Network:              Kite Testnet (Chain ID 2368)
-
-  {BOLD}Performance{RESET}
-  {BAR}
-  Total duration:       {total_duration:.2f}s
-  Avg round time:       {total_duration / max(total_rounds, 1):.2f}s
-
-  {BOLD}Price Convergence{RESET}
+  {BOLD}On-chain artefacts{RESET}
   {BAR}""")
 
-    # ASCII price chart
-    chart_width = 50
-    all_prices_display = [p / PRICE_SCALE for p in buyer_offers + seller_offers]
-    if all_prices_display:
-        p_min = min(all_prices_display) * 0.95
-        p_max_chart = max(all_prices_display) * 1.05
-        p_range = p_max_chart - p_min if p_max_chart > p_min else 0.01
+    for tx in ctx.txs:
+        if not tx["tx"]:
+            continue
+        print(f"  • {tx['kind']:<22} {tx['tx'][:48]}...")
+        print(f"    {DIM}{kitescan_link(tx['tx'])}{RESET}")
 
-        for i in range(total_rounds):
-            bp = buyer_offers[i] / PRICE_SCALE if i < len(buyer_offers) else 0
-            sp = seller_offers[i] / PRICE_SCALE if i < len(seller_offers) else 0
-            bp_pos = int((bp - p_min) / p_range * chart_width)
-            sp_pos = int((sp - p_min) / p_range * chart_width)
+    print(f"""
+  {BOLD}Deployed contracts (Kite Testnet, chain 2368){RESET}
+  {BAR}
+  IdentityRegistry    {config.contracts.identity_registry}
+    {DIM}{kitescan_addr_link(config.contracts.identity_registry)}{RESET}
+  ReputationRegistry  {config.contracts.reputation_registry}
+    {DIM}{kitescan_addr_link(config.contracts.reputation_registry)}{RESET}
+  DealRecord          {config.contracts.deal_record}
+    {DIM}{kitescan_addr_link(config.contracts.deal_record)}{RESET}
 
-            line = [" "] * (chart_width + 1)
-            bp_pos = max(0, min(chart_width, bp_pos))
-            sp_pos = max(0, min(chart_width, sp_pos))
-            line[bp_pos] = f"{BLUE}●{RESET}"
-            line[sp_pos] = f"{MAGENTA}●{RESET}"
-            bar_str = "".join(line)
-            print(f"  R{i + 1}  ${bp:.4f} {BLUE}B{RESET} {'─' * max(0, sp_pos - bp_pos - 1)} {MAGENTA}S{RESET} ${sp:.4f}  {DIM}|{bar_str}|{RESET}")
-
-        if agreed_price:
-            ap_pos = int((agreed_display - p_min) / p_range * chart_width)
-            ap_pos = max(0, min(chart_width, ap_pos))
-            line = [" "] * (chart_width + 1)
-            line[ap_pos] = f"{GREEN}◆{RESET}"
-            bar_str = "".join(line)
-            print(f"  {GREEN}DEAL{RESET} ${agreed_display:.4f}            {DIM}|{bar_str}|{RESET}")
-
-        print(f"""
-  {DIM}Legend: {BLUE}● Buyer{RESET}  {MAGENTA}● Seller{RESET}  {GREEN}◆ Agreed{RESET}{DIM}
-         Price axis: ${p_min:.4f} ← → ${p_max_chart:.4f}{RESET}
+  {BOLD}{GREEN}Demo complete in {elapsed:.1f}s.{RESET}
+  {DIM}NegotiatorGrid v0.1 · Kite AI × Encode Club Hackathon · Novel track{RESET}
 """)
 
-    print(f"  {BOLD}{GREEN}Demo complete!{RESET} Full pipeline executed in {total_duration:.2f}s")
-    print(f"  {DIM}NegotiatorGrid v0.1.0 — Kite AI × Encode Club Hackathon{RESET}")
-    print()
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+
+async def run_demo() -> None:
+    banner()
+    started = time.time()
+
+    section("Preflight", "🔧")
+    _require_env()
+    w3 = _build_web3()
+    chain_id = w3.eth.chain_id
+    buyer_account = Account.from_key(config.kite.private_key)
+    balance_wei = w3.eth.get_balance(buyer_account.address)
+    info_box(
+        "Buyer wallet (deployer)",
+        [
+            f"Address:   {buyer_account.address}",
+            f"Chain ID:  {chain_id}  ({DIM}Kite Testnet{RESET})",
+            f"Balance:   {w3.from_wei(balance_wei, 'ether')} KITE",
+            f"RPC:       {config.kite.rpc_url}",
+        ],
+    )
+    pk = config.kite.private_key
+    identity = IdentityClient(w3, config.contracts.identity_registry, pk)
+    reputation = ReputationClient(w3, config.contracts.reputation_registry, pk)
+    deal_record = DealRecordClient(w3, config.contracts.deal_record, pk)
+    settler = X402Settler(private_key=pk)
+    ctx = DemoContext(
+        w3=w3, buyer_account=buyer_account,
+        identity=identity, reputation=reputation, deal_record=deal_record,
+        settler=settler,
+    )
+
+    async with httpx.AsyncClient() as client:
+        health = await _check_surprise_api(client)
+        ok(f"Surprise API healthy: network={health.get('network')}")
+        await _reset_surprise_pricing(client)
+
+        agent_card = await _fetch_agent_card(client)
+
+        a1 = await act1_baseline(ctx, client)
+        a2 = await act2_with_negotiatorgrid(ctx, client, agent_card)
+        a3 = None
+        try:
+            a3 = await act3_reputation_conditioned(ctx, client)
+        except Exception as exc:
+            warn(f"Act 3 partial failure (non-blocking): {exc}")
+
+        elapsed = time.time() - started
+        print_summary(ctx, a1, a2, a3, elapsed)
 
 
 def main() -> None:
-    """Entry point for the demo script."""
     try:
         asyncio.run(run_demo())
     except KeyboardInterrupt:
