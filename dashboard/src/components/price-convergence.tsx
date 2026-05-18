@@ -112,6 +112,25 @@ export function PriceConvergenceChart({
 
   const finalData = dealReached ? dealData : chartData;
 
+  // Calculate dynamic y-axis domain based on actual price range
+  const yAxisDomain = useMemo(() => {
+    if (finalData.length === 0) return [0.05, 0.15]; // fallback
+
+    const allPrices = finalData.flatMap(d => [d.buyerPrice, d.sellerPrice].filter((p): p is number => p !== null));
+    if (allPrices.length === 0) return [0.05, 0.15];
+
+    const minPrice = Math.min(...allPrices);
+    const maxPrice = Math.max(...allPrices);
+    const range = maxPrice - minPrice;
+
+    // Add 10% padding on each side, with minimum 0.02 range
+    const padding = Math.max(range * 0.1, 0.01);
+    return [
+      Math.max(0, minPrice - padding),
+      maxPrice + padding,
+    ];
+  }, [finalData]);
+
   return (
     <div className={`card-base p-5 ${className}`}>
       <div className="flex items-center justify-between mb-4">
@@ -181,9 +200,9 @@ export function PriceConvergenceChart({
             fontSize={11}
             tickLine={false}
             axisLine={{ stroke: "#2a2d3a" }}
-            domain={[0.05, 0.15]}
-            tickFormatter={(v: number) => `$${v.toFixed(2)}`}
-            width={55}
+            domain={yAxisDomain}
+            tickFormatter={(v: number) => `$${v.toFixed(4)}`}
+            width={60}
           />
           <Tooltip content={<CustomTooltip />} />
           <Legend

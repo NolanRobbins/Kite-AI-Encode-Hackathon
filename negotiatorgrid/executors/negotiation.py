@@ -280,8 +280,12 @@ def _agent_exponent(config: AgentConfig, objective_mode: str) -> float:
     )
 
     if not config.grid_enabled:
-        # A plain baseline agent still negotiates, but without adaptive grid help.
-        exponent = min(exponent, 1.0)
+        # Grid disabled: force more conservative/submissive behavior
+        # This makes Grid On/Off differences more visually apparent
+        if config.role == "buyer":
+            exponent = 0.5  # Buyer concedes faster without opponent modeling
+        else:
+            exponent = 0.75  # Seller also more cooperative without grid intelligence
 
     if objective_mode == "pure_nash":
         return min(exponent, 0.75)

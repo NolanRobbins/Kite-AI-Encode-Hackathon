@@ -115,7 +115,7 @@ class AgentConfigSchema(BaseModel):
     agent_id: str = ""
     address: str = "0x0000000000000000000000000000000000000000"
     role: str = "buyer"
-    reservation_price: float = 0.10
+    reservation_price: float = 0.10  # Will be adjusted based on role if not explicitly set
     initial_price: float = 0.05
     strategy: str = "aspiration"
     concession_rate: float = 0.05
@@ -125,9 +125,36 @@ class AgentConfigSchema(BaseModel):
     malicious_seller: bool = False
     seller_agent_id: int = 0
 
+    def model_post_init(self, __context: Any) -> None:
+        """Adjust defaults based on role if not explicitly set."""
+        # If using placeholder address, derive from config private key for buyer
+        if self.address == "0x0000000000000000000000000000000000000000":
+            if self.role == "buyer" and kite_config.kite.private_key:
+                from eth_account import Account
+                self.address = Account.from_key(kite_config.kite.private_key).address
+            elif self.role == "seller":
+                # Use a deterministic seller placeholder (not 0x000... to avoid validation errors)
+                self.address = "0xa7C52Bd9E51E6c49aB2F0aB30c57Bb24aB1B91B7"  # Surprise API seller
+
+        # If using default 0.10, apply role-aware defaults
+        # Buyer reservation: max willing to pay (higher)
+        # Seller reservation: min willing to accept (lower)
+        if self.reservation_price == 0.10:
+            if self.role == "buyer":
+                self.reservation_price = 0.030  # Buyer's walk-away ceiling
+            elif self.role == "seller":
+                self.reservation_price = 0.022  # Seller's walk-away floor
+
+        # Similarly adjust initial_price if at default
+        if self.initial_price == 0.05:
+            if self.role == "buyer":
+                self.initial_price = 0.020  # Buyer opens low
+            elif self.role == "seller":
+                self.initial_price = 0.030  # Seller opens high (at list price)
+
 
 class NegotiationParamsSchema(BaseModel):
-    max_rounds: int = Field(default=7, ge=1, le=50)
+    max_rounds: int = Field(default=12, ge=1, le=50)  # Increased from 7 to 12 for better mode/grid visibility
     timeout_seconds: int = Field(default=30, ge=5, le=300)
     resource_uri: str = "/api/service"
     scope: str = "weather-data"

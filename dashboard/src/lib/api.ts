@@ -206,10 +206,22 @@ export async function startNegotiation(
     body: JSON.stringify(
       liveNvda
         ? {
-            buyer_config: { agent_id: "server-buyer", address: "0x0000000000000000000000000000000000000000", role: "buyer" },
-            seller_config: { agent_id: "server-seller", address: "0x0000000000000000000000000000000000000000", role: "seller" },
+            buyer_config: {
+              agent_id: "server-buyer",
+              address: "0x0000000000000000000000000000000000000000",
+              role: "buyer",
+              grid_enabled: controls.buyer.gridEnabled,
+              tendency: controls.buyer.tendency,
+            },
+            seller_config: {
+              agent_id: "server-seller",
+              address: "0x0000000000000000000000000000000000000000",
+              role: "seller",
+              grid_enabled: controls.seller.gridEnabled,
+              tendency: controls.seller.tendency,
+            },
             negotiation_params: {
-              max_rounds: 7,
+              max_rounds: 12,
               timeout_seconds: 30,
               resource_uri: "/api/nvda",
               scope: "nvda-market-data",
@@ -255,7 +267,7 @@ export async function startNegotiation(
               reputation_score: 78,
             },
             negotiation_params: {
-              max_rounds: 7,
+              max_rounds: 12,
               timeout_seconds: 30,
               resource_uri: "/api/weather-pro",
               scope: "weather-data",
