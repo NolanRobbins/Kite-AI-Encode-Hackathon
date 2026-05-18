@@ -160,27 +160,92 @@ NegotiatorGrid adds a **negotiation phase before Passport-authorized x402 settle
 
 ---
 
-## Quick Start
+## Quick Start (Hackathon Demo)
 
+### Prerequisites
+- Python 3.11+
+- Node.js 20+
+- [uv](https://github.com/astral-sh/uv) (recommended) or pip
+
+### Setup (10 minutes)
+
+1. **Clone and install dependencies**
 ```bash
 git clone https://github.com/NolanRobbins/Kite-AI-Encode-Hackathon.git
 cd Kite-AI-Encode-Hackathon
-pip install -e .
-python demo.py
+
+# Create virtual environment
+uv venv .venv-demo
+source .venv-demo/bin/activate  # On Windows: .venv-demo\Scripts\activate
+
+# Install Python dependencies
+uv pip install -r requirements.txt
+
+# Install dashboard dependencies
+cd dashboard
+npm install
+cd ..
 ```
 
-For the hackathon submission run path (stable dashboard + optional Act 3), see [DEMO_STABLE.md](DEMO_STABLE.md).
+2. **Configure environment**
+```bash
+cp .env.example .env
+# Edit .env and add:
+# - OPENAI_API_KEY=sk-...
+# - XAI_API_KEY=xai-...
+# - PRIVATE_KEY=0x... (for Kite Testnet transactions)
+```
 
-Fast local dashboard startup from repo root:
+3. **Run the demo** (3 terminals)
 
-```powershell
+**Terminal 1 - Surprise API (data service):**
+```bash
+# macOS/Linux:
+./scripts/run_surprise_api.sh
+
+# Windows:
+.\scripts\run_surprise_api.ps1
+```
+
+**Terminal 2 - NegotiatorGrid API:**
+```bash
+# macOS/Linux:
+./scripts/run_negotiatorgrid_api.sh
+
+# Windows:
 .\scripts\run_negotiatorgrid_api.ps1
+```
+
+**Terminal 3 - Dashboard:**
+```bash
+# macOS/Linux:
+./scripts/run_dashboard.sh
+
+# Windows:
 .\scripts\run_dashboard.ps1
 ```
 
-Then open `http://localhost:3000`.
+4. **Open dashboard**
+```
+http://localhost:3000
+```
 
-The demo runs a complete 7-round bilateral negotiation between a buyer agent ("DataBuyer-Alpha") and a seller agent ("WeatherPro-Service"), including ERC-8004 identity registration, reputation lookup, NegMAS negotiation with opponent modeling, Nash equilibrium validation, x402 settlement, and on-chain attestation — all with formatted terminal output and an ASCII price convergence chart.
+Click **"Live NVDA + Kite"** to run a complete autonomous negotiation with:
+- Discovery via A2A protocol
+- ERC-8004 identity verification
+- 12-round bilateral bargaining with Grid opponent modeling
+- Hash-mismatch payment protection
+- x402 settlement
+- On-chain attestation to Kite Testnet
+
+### CLI Demo (Alternative)
+
+```bash
+source .venv-demo/bin/activate
+python demo.py
+```
+
+Runs a complete negotiation in the terminal with formatted output and ASCII price convergence chart.
 
 ### Requirements
 
